@@ -49,6 +49,14 @@
     {
       "name": "frame-context",
       "description": "Get accessibility text, parsed tree nodes, and extracted URLs for a specific frame"
+    },
+    {
+      "name": "get-context",
+      "description": "Get current context: active apps, speakers, meetings, memories, compact timeline (~200 tokens). Call first."
+    },
+    {
+      "name": "list-sessions",
+      "description": "List activity sessions (topic clusters) for topic-filtered search"
     }
   ],
   "compatibility": {

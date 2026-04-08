@@ -100,20 +100,20 @@ export function useLiveText(opts: {
 
 		// For snapshot frames, use the local file path directly (instant).
 		// For video-chunk frames, fall back to HTTP endpoint (requires ffmpeg extraction).
-		const imagePath = isSnapshotFrame && debouncedFrame.filePath
-			? debouncedFrame.filePath
-			: `http://localhost:3030/frames/${debouncedFrame.frameId}`;
+		const imagePath = `http://localhost:3030/frames/${debouncedFrame.frameId}`;
 
 		// Position is managed exclusively by livetext_update_position.
 		// The analyze call only sets the analysis + shows the overlay.
-		// Debounce: 50ms — short enough to feel near-instant, long enough to skip
-		// rapid arrow key presses. The 80ms frame-loading debounce already handles
-		// fast scrolling; generation counter in Swift cancels stale requests.
+		// Debounce: 150ms — short enough to feel responsive, long enough to skip
+		// intermediate frames during fast scroll. Generation counter in Swift
+		// handles cancellation of stale in-flight requests.
 		let cancelled = false;
+		const currentFrameId = String(debouncedFrame.frameId);
 		const timer = setTimeout(() => {
 			if (cancelled) return;
 			invoke("livetext_analyze", {
 				imagePath,
+				frameId: currentFrameId,
 				x: 0, y: 0, w: 0, h: 0,
 			}).then(() => {
 				analyzeFailCountRef.current = 0;
@@ -121,7 +121,7 @@ export function useLiveText(opts: {
 				// to apply it with correct geometry for hit-region computation.
 				if (!cancelled && renderedImageInfo) {
 					const pos = getAbsolutePosition(renderedImageInfo);
-					invoke("livetext_update_position", pos).catch(() => {});
+					invoke("livetext_update_position", { frameId: currentFrameId, ...pos }).catch(() => {});
 				}
 			}).catch((e: unknown) => {
 				if (cancelled) return;
@@ -140,55 +140,27 @@ export function useLiveText(opts: {
 				}
 				console.warn("live text analyze failed:", e);
 			});
-		}, 50);
+		}, 150);
 		return () => { cancelled = true; clearTimeout(timer); };
-	}, [nativeLiveTextActive, debouncedFrame?.frameId, isSnapshotFrame]);
+	}, [nativeLiveTextActive, debouncedFrame?.frameId]);
 
-	// Prefetch VisionKit analysis for adjacent frames so scrolling is instant.
-	// Fire-and-forget: Swift caches results in an LRU for future hits.
-	useEffect(() => {
-		if (!nativeLiveTextActive || !adjacentFrames?.length) return;
-
-		const paths: string[] = [];
-		const seen = new Set<string>();
-		if (debouncedFrame?.filePath) seen.add(debouncedFrame.filePath);
-
-		for (const frame of adjacentFrames) {
-			const dev = frame?.devices?.[0];
-			if (!dev?.frame_id) continue;
-			const filePath = dev.metadata?.file_path;
-			const lower = filePath?.toLowerCase() ?? "";
-			const isSnapshot = lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png");
-
-			// Use local file for snapshots, HTTP for video chunks
-			const imagePath = isSnapshot && filePath
-				? filePath
-				: `http://localhost:3030/frames/${dev.frame_id}`;
-
-			if (seen.has(imagePath)) continue;
-			seen.add(imagePath);
-			paths.push(imagePath);
-		}
-
-		if (paths.length > 0) {
-			invoke("livetext_prefetch", { paths }).catch(() => {});
-		}
-	}, [nativeLiveTextActive, debouncedFrame?.frameId, adjacentFrames]);
+	// Prefetch disabled — each prefetch call blocks a GCD thread via
+	// DispatchSemaphore in Swift's analyzeImage(), causing thread exhaustion
+	// and app freeze when scrolling fast. The LRU cache still works for
+	// revisited frames; prefetch can be re-enabled once analyzeImage is async.
 
 	// Update overlay position on resize or when renderedImageInfo first becomes available
 	useEffect(() => {
-		if (!nativeLiveTextActive || !renderedImageInfo) return;
+		if (!nativeLiveTextActive || !renderedImageInfo || !debouncedFrame?.frameId) return;
 		const pos = getAbsolutePosition(renderedImageInfo);
-		invoke("livetext_update_position", pos).catch(() => {});
-	}, [nativeLiveTextActive, renderedImageInfo?.offsetX, renderedImageInfo?.offsetY, renderedImageInfo?.width, renderedImageInfo?.height]);
+		invoke("livetext_update_position", { frameId: String(debouncedFrame.frameId), ...pos }).catch(() => {});
+	}, [nativeLiveTextActive, debouncedFrame?.frameId, renderedImageInfo?.offsetX, renderedImageInfo?.offsetY, renderedImageInfo?.width, renderedImageInfo?.height]);
 
 	// Place click guards over UI elements so VisionKit hit regions
 	// don't intercept clicks on navigation controls, filters, scrubber, etc.
-	// Uses ResizeObserver + MutationObserver to track layout changes.
 	useEffect(() => {
 		if (!nativeLiveTextActive) return;
 
-		// Collect all named guard refs: navBarRef as "navbar" + any extra guardRefs
 		const allGuards: Record<string, React.RefObject<HTMLDivElement | null>> = {
 			...(navBarRef ? { navbar: navBarRef } : {}),
 			...guardRefs,
@@ -212,16 +184,13 @@ export function useLiveText(opts: {
 			}
 		};
 
-		// Initial update
 		updateAll();
 
-		// Watch for layout changes with ResizeObserver
 		const ro = new ResizeObserver(() => updateAll());
 		for (const ref of Object.values(allGuards)) {
 			if (ref.current) ro.observe(ref.current);
 		}
 
-		// Also update on window resize (catches zoom, fullscreen, etc.)
 		window.addEventListener("resize", updateAll);
 
 		return () => {
@@ -248,16 +217,16 @@ export function useLiveText(opts: {
 		} else if (debouncedFrame?.frameId) {
 			// Re-analyze to show overlay again, then send position update
 			// to apply the pending analysis with correct geometry.
-			const imagePath = isSnapshotFrame && debouncedFrame.filePath
-				? debouncedFrame.filePath
-				: `http://localhost:3030/frames/${debouncedFrame.frameId}`;
+			const imagePath = `http://localhost:3030/frames/${debouncedFrame.frameId}`;
+			const fid = String(debouncedFrame.frameId);
 			invoke("livetext_analyze", {
 				imagePath,
+				frameId: fid,
 				x: 0, y: 0, w: 0, h: 0,
 			}).then(() => {
 				if (renderedImageInfo) {
 					const pos = getAbsolutePosition(renderedImageInfo);
-					invoke("livetext_update_position", pos).catch(() => {});
+					invoke("livetext_update_position", { frameId: fid, ...pos }).catch(() => {});
 				}
 			}).catch(() => {});
 		}

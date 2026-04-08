@@ -71,6 +71,24 @@ async checkArcAutomationPermission() : Promise<boolean> {
 async requestArcAutomationPermission() : Promise<boolean> {
     return await TAURI_INVOKE("request_arc_automation_permission");
 },
+/**
+ * Returns the names of installed Chromium browsers that need Automation permission
+ */
+async getInstalledBrowsers() : Promise<string[]> {
+    return await TAURI_INVOKE("get_installed_browsers");
+},
+/**
+ * Check if Automation permission is granted for all installed Chromium browsers.
+ */
+async checkBrowsersAutomationPermission() : Promise<boolean> {
+    return await TAURI_INVOKE("check_browsers_automation_permission");
+},
+/**
+ * Request Automation permission for all installed Chromium browsers that are currently running.
+ */
+async requestBrowsersAutomationPermission() : Promise<boolean> {
+    return await TAURI_INVOKE("request_browsers_automation_permission");
+},
 async getEnv(name: string) : Promise<string> {
     return await TAURI_INVOKE("get_env", { name });
 },
@@ -519,6 +537,19 @@ async getSyncDevices() : Promise<Result<SyncDeviceInfo[], string>> {
 async removeSyncDevice(deviceId: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("remove_sync_device", { deviceId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete all locally-stored data that was synced from a specific remote device.
+ * This calls the local screenpipe server's /data/delete-device endpoint.
+ * Refuses to delete data for the current device as a safety guard.
+ */
+async deleteDeviceLocalData(machineId: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_device_local_data", { machineId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

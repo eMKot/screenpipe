@@ -88,6 +88,12 @@ pub(crate) struct SearchQuery {
     /// Filter results by machine identifier (UUID)
     #[serde(default)]
     machine_id: Option<String>,
+    /// Filter by activity session topic (e.g. "orion-auth"). Pre-filters by session time range and apps.
+    #[serde(default)]
+    topic: Option<String>,
+    /// Filter by activity session ID. Pre-filters by session time range and apps.
+    #[serde(default)]
+    session_id: Option<i64>,
 }
 
 #[derive(OaSchema, Deserialize)]
@@ -195,6 +201,54 @@ pub(crate) async fn search(
 
     let content_type = query.content_type.clone();
 
+    // Session-based pre-filtering: if topic or session_id is given, look up
+    // the session to narrow time range and app_name filter.
+    let mut effective_start = query.start_time;
+    let mut effective_end = query.end_time;
+    let mut effective_app: Option<String> = query.app_name.clone();
+
+    if query.session_id.is_some() || query.topic.is_some() {
+        let session_sql = if let Some(sid) = query.session_id {
+            format!(
+                "SELECT start_time, end_time, apps FROM activity_sessions WHERE id = {}",
+                sid
+            )
+        } else {
+            format!(
+                "SELECT start_time, end_time, apps FROM activity_sessions WHERE topic = '{}' ORDER BY start_time DESC LIMIT 1",
+                query.topic.as_deref().unwrap_or("").replace('\'', "''")
+            )
+        };
+
+        if let Ok(rows) = state.db.execute_raw_sql(&session_sql).await {
+            if let Some(row) = rows.as_array().and_then(|a| a.first()) {
+                if let Some(st) = row.get("start_time").and_then(|v| v.as_str()) {
+                    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(st)
+                        .or_else(|_| chrono::DateTime::parse_from_str(st, "%Y-%m-%dT%H:%M:%SZ"))
+                    {
+                        effective_start = Some(parsed.with_timezone(&Utc));
+                    }
+                }
+                if let Some(et) = row.get("end_time").and_then(|v| v.as_str()) {
+                    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(et)
+                        .or_else(|_| chrono::DateTime::parse_from_str(et, "%Y-%m-%dT%H:%M:%SZ"))
+                    {
+                        effective_end = Some(parsed.with_timezone(&Utc));
+                    }
+                }
+                // Use the first app from the session if no app_name filter was given
+                if effective_app.is_none() {
+                    if let Some(apps_str) = row.get("apps").and_then(|v| v.as_str()) {
+                        let apps: Vec<String> = serde_json::from_str(apps_str).unwrap_or_default();
+                        if apps.len() == 1 {
+                            effective_app = Some(apps[0].clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let (results, total) = timeout(
         Duration::from_secs(30),
         try_join(
@@ -203,9 +257,9 @@ pub(crate) async fn search(
                 content_type.clone(),
                 query.pagination.limit,
                 query.pagination.offset,
-                query.start_time,
-                query.end_time,
-                query.app_name.as_deref(),
+                effective_start,
+                effective_end,
+                effective_app.as_deref(),
                 query.window_name.as_deref(),
                 query.min_length,
                 query.max_length,
@@ -220,9 +274,9 @@ pub(crate) async fn search(
             state.db.count_search_results(
                 query_str,
                 content_type,
-                query.start_time,
-                query.end_time,
-                query.app_name.as_deref(),
+                effective_start,
+                effective_end,
+                effective_app.as_deref(),
                 query.window_name.as_deref(),
                 query.min_length,
                 query.max_length,

@@ -6,6 +6,7 @@ import { useEffect, useState, useRef, useMemo } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { throttle } from "lodash";
 import type { StreamTimeSeriesResponse } from "@/components/rewind/timeline";
+import { useTimelineSelection } from "@/lib/hooks/use-timeline-selection";
 
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 4;
@@ -58,6 +59,15 @@ export function useScrollZoom(opts: {
 	const isZoomingRef = useRef(false);
 	const zoomTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+	// Track mouse position for native-scroll hit-testing (no DOM target available)
+	const lastMouseX = useRef(0);
+	const lastMouseY = useRef(0);
+	useEffect(() => {
+		const onMove = (e: MouseEvent) => { lastMouseX.current = e.clientX; lastMouseY.current = e.clientY; };
+		document.addEventListener("mousemove", onMove);
+		return () => document.removeEventListener("mousemove", onMove);
+	}, []);
+
 	// Smooth zoom animation — zoomLevel is read only via the setter callback
 	// to avoid re-running the effect on every intermediate frame.
 	useEffect(() => {
@@ -73,6 +83,8 @@ export function useScrollZoom(opts: {
 		rafId = requestAnimationFrame(animate);
 		return () => { if (rafId !== null) cancelAnimationFrame(rafId); };
 	}, [targetZoom]);
+
+	const clearSelectionRange = useTimelineSelection((s) => s.setSelectionRange);
 
 	const handleScroll = useMemo(
 		() =>
@@ -126,6 +138,9 @@ export function useScrollZoom(opts: {
 							)),
 						);
 
+					// Clear timeline selection when scrolling to navigate
+					clearSelectionRange(null);
+
 					requestAnimationFrame(() => {
 						setCurrentIndex((prevIndex: number) => {
 							let newIndex: number;
@@ -159,7 +174,7 @@ export function useScrollZoom(opts: {
 				{ leading: true, trailing: false },
 			),
 			// eslint-disable-next-line react-hooks/exhaustive-deps
-	[frames, zoomLevel, pausePlayback, matchingIndices, hasSearchHighlight, dismissSearchHighlight], // Re-create when zoom/filter changes
+	[frames, zoomLevel, pausePlayback, matchingIndices, hasSearchHighlight, dismissSearchHighlight, clearSelectionRange], // Re-create when zoom/filter changes
 	);
 
 	// Attach scroll/zoom handler so pinch-to-zoom and scroll-to-navigate work.
@@ -247,9 +262,18 @@ export function useScrollZoom(opts: {
 		}>("native-scroll", (event) => {
 			const { deltaX, deltaY, ctrlKey, metaKey } = event.payload;
 
-			// Don't intercept scroll when search modal is open — SearchModal
-			// has its own native-scroll listener for scrolling results
+			// Don't intercept scroll when a modal/panel is open
 			if (showSearchModal) return;
+
+			// Check if cursor is over a panel/dialog — let those scroll natively
+			const target = document.elementFromPoint(lastMouseX.current, lastMouseY.current);
+			if (target) {
+				const isOverExcluded =
+					document.querySelector(".audio-transcript-panel")?.contains(target) ||
+					document.querySelector(".ai-panel")?.contains(target) ||
+					document.querySelector('[role="dialog"]')?.contains(target);
+				if (isOverExcluded) return;
+			}
 
 			pausePlayback();
 
@@ -303,6 +327,9 @@ export function useScrollZoom(opts: {
 					)),
 				);
 
+			// Clear timeline selection when scrolling to navigate
+			clearSelectionRange(null);
+
 			requestAnimationFrame(() => {
 				setCurrentIndex((prevIndex: number) => {
 					let newIndex: number;
@@ -332,7 +359,7 @@ export function useScrollZoom(opts: {
 		});
 		return () => { unlisten.then((f) => f()); };
 	// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [embedded, frames, zoomLevel, pausePlayback, matchingIndices, hasSearchHighlight, dismissSearchHighlight, inSearchReviewMode, searchResultIndex, searchResultsCount, showSearchModal]);
+	}, [embedded, frames, zoomLevel, pausePlayback, matchingIndices, hasSearchHighlight, dismissSearchHighlight, inSearchReviewMode, searchResultIndex, searchResultsCount, showSearchModal, clearSelectionRange]);
 
 	// React onWheel handler for embedded mode — attached directly via JSX prop
 	// as a fallback when addEventListener on document/container doesn't receive events

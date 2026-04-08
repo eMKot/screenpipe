@@ -102,6 +102,33 @@ pub async fn get_frame_data(
         // If not in cache or cache disabled, get from database
         match state.db.get_frame(frame_id).await {
             Ok(Some((file_path, offset_index, is_snapshot))) => {
+                // Synced frame from another device — no local file exists.
+                // Return metadata (OCR text, app/window context) instead of 410.
+                if file_path.starts_with("cloud://") {
+                    let ocr_text = state
+                        .db
+                        .get_frame_ocr_text_json(frame_id)
+                        .await
+                        .ok()
+                        .flatten();
+                    let timestamp = state.db.get_frame_timestamp(frame_id).await.ok().flatten();
+                    let (acc_text, _) = state
+                        .db
+                        .get_frame_accessibility_data(frame_id)
+                        .await
+                        .unwrap_or((None, None));
+
+                    let metadata = json!({
+                        "error": "Frame is on a remote device",
+                        "error_type": "remote_device",
+                        "frame_id": frame_id,
+                        "timestamp": timestamp,
+                        "ocr_text": ocr_text,
+                        "accessibility_text": acc_text,
+                    });
+                    return Err((StatusCode::NOT_FOUND, JsonResponse(metadata)));
+                }
+
                 if is_snapshot {
                     // Snapshot frame — serve JPEG directly (no ffmpeg needed)
                     if query.redact_pii {
@@ -638,14 +665,14 @@ fn extract_urls_regex(text: &str) -> Vec<String> {
 
 /// Response type for frame OCR data endpoint
 #[derive(OaSchema, Serialize)]
-pub struct FrameOcrResponse {
+pub struct FrameTextResponse {
     pub frame_id: i64,
     pub text_positions: Vec<TextPosition>,
 }
 
 /// Optional query parameter for filtering text positions by search term.
 #[derive(Debug, Deserialize, OaSchema)]
-pub struct FrameOcrQuery {
+pub struct FrameTextQuery {
     /// When provided, only return text positions matching this search term.
     /// Without this, the a11y fallback returns ALL text nodes (hundreds of them).
     pub query: Option<String>,
@@ -656,11 +683,11 @@ pub struct FrameOcrQuery {
 /// Both OCR and accessibility bounds are normalized to 0-1 relative to the
 /// monitor (full-screen capture), so they align correctly with the screenshot.
 #[oasgen]
-pub async fn get_frame_ocr_data(
+pub async fn get_frame_text_data(
     State(state): State<Arc<AppState>>,
     Path(frame_id): Path<i64>,
-    Query(params): Query<FrameOcrQuery>,
-) -> Result<JsonResponse<FrameOcrResponse>, (StatusCode, JsonResponse<Value>)> {
+    Query(params): Query<FrameTextQuery>,
+) -> Result<JsonResponse<FrameTextResponse>, (StatusCode, JsonResponse<Value>)> {
     // Get OCR data (bounding boxes from Apple Vision)
     let mut text_positions = match state.db.get_frame_text_positions(frame_id).await {
         Ok(tp) => tp,
@@ -756,7 +783,7 @@ pub async fn get_frame_ocr_data(
         }
     }
 
-    Ok(JsonResponse(FrameOcrResponse {
+    Ok(JsonResponse(FrameTextResponse {
         frame_id,
         text_positions,
     }))
@@ -770,11 +797,11 @@ pub async fn get_frame_ocr_data(
 pub async fn run_frame_ocr(
     State(state): State<Arc<AppState>>,
     Path(frame_id): Path<i64>,
-) -> Result<JsonResponse<FrameOcrResponse>, (StatusCode, JsonResponse<Value>)> {
+) -> Result<JsonResponse<FrameTextResponse>, (StatusCode, JsonResponse<Value>)> {
     // Check if OCR data already exists — avoid redundant work
     match state.db.get_frame_text_positions(frame_id).await {
         Ok(existing) if !existing.is_empty() => {
-            return Ok(JsonResponse(FrameOcrResponse {
+            return Ok(JsonResponse(FrameTextResponse {
                 frame_id,
                 text_positions: existing,
             }));
@@ -908,7 +935,7 @@ pub async fn run_frame_ocr(
         .await
         .unwrap_or_default();
 
-    Ok(JsonResponse(FrameOcrResponse {
+    Ok(JsonResponse(FrameTextResponse {
         frame_id,
         text_positions,
     }))
@@ -1019,10 +1046,17 @@ pub(crate) async fn serve_file(path: &str) -> Result<Response, (StatusCode, Json
 
             Ok(response)
         }
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            JsonResponse(json!({"error": format!("Failed to open file: {}", e)})),
-        )),
+        Err(e) => {
+            let status = if e.kind() == std::io::ErrorKind::NotFound {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            Err((
+                status,
+                JsonResponse(json!({"error": format!("Failed to open file: {}", e)})),
+            ))
+        }
     }
 }
 

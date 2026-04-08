@@ -279,7 +279,7 @@ impl UpdatesManager {
                 // TrayIcon must be accessed/dropped on the main thread
                 let app_clone = self.app.clone();
                 let _ = self.app.run_on_main_thread(move || {
-                    crate::window_api::with_autorelease_pool(|| {
+                    crate::window::with_autorelease_pool(|| {
                         if let Some(tray) = app_clone.tray_by_id("screenpipe_main") {
                             if let Err(e) = crate::safe_icon::safe_set_icon_as_template(&tray, image) {
                                 error!("failed to set tray update icon: {}", e);
@@ -624,8 +624,8 @@ pub fn start_update_check(
     let updates_manager = Arc::new(UpdatesManager::new(app, interval_minutes)?);
 
     // Clean up old rollback directory if it exists (legacy, no longer needed)
-    if let Some(home) = dirs::home_dir() {
-        let rollback_dir = home.join(".screenpipe").join("rollback");
+    {
+        let rollback_dir = screenpipe_core::paths::default_screenpipe_data_dir().join("rollback");
         if rollback_dir.exists() {
             let _ = std::fs::remove_dir_all(&rollback_dir);
             info!("rollback: cleaned up legacy rollback directory");

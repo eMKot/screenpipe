@@ -459,7 +459,7 @@ fn parse_where_output(stdout: &str) -> Option<String> {
 /// Find pi executable
 /// Returns the screenpipe-managed pi install directory (`~/.screenpipe/pi-agent/`).
 fn pi_local_install_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".screenpipe").join("pi-agent"))
+    Some(screenpipe_core::paths::default_screenpipe_data_dir().join("pi-agent"))
 }
 
 /// Seed the pi-agent package.json with overrides to fix dependency resolution.
@@ -1400,7 +1400,7 @@ pub async fn pi_start_inner(
             info!("Pi readiness signal received (pid: {})", pid);
         }
         _ = tokio::time::sleep(PI_READY_TIMEOUT) => {
-            warn!("Pi readiness timeout after {:?} (pid: {}), checking if alive", PI_READY_TIMEOUT, pid);
+            debug!("Pi readiness timeout after {:?} (pid: {}), checking if alive", PI_READY_TIMEOUT, pid);
         }
     }
     {
@@ -1563,9 +1563,7 @@ pub async fn pi_update_config(
     );
 
     // Resolve the chat project directory
-    let home = dirs::home_dir().ok_or("could not resolve home directory")?;
-    let project_dir = home
-        .join(".screenpipe")
+    let project_dir = screenpipe_core::paths::default_screenpipe_data_dir()
         .join("pi-chat")
         .to_string_lossy()
         .to_string();

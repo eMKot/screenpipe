@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useSettings, ChatMessage, ChatConversation } from "@/lib/hooks/use-settings";
 import { cn } from "@/lib/utils";
-import { Loader2, Send, Square, User, Settings, ExternalLink, X, ImageIcon, Zap, History, Search, Trash2, ChevronLeft, ChevronDown, ChevronUp, Plus, Copy, Check, Clock, Paperclip, Filter } from "lucide-react";
+import { Loader2, Send, Square, User, Settings, ExternalLink, X, ImageIcon, Zap, History, Search, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Plus, Copy, Check, Clock, Paperclip, Filter } from "lucide-react";
 import { SchedulePromptDialog } from "@/components/chat/schedule-prompt-dialog";
 import { toast } from "@/components/ui/use-toast";
 import { motion, AnimatePresence } from "framer-motion";
@@ -37,6 +37,7 @@ import { useSqlAutocomplete } from "@/lib/hooks/use-sql-autocomplete";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { useTimelineStore } from "@/lib/hooks/use-timeline-store";
 import { UpgradeDialog } from "@/components/upgrade-dialog";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import {
   parseMentions,
   buildAppMentionSuggestions,
@@ -303,64 +304,141 @@ function GridDissolveLoader({
   );
 }
 
-function ToolCallBlock({ toolCall }: { toolCall: ToolCall }) {
-  const [expanded, setExpanded] = useState(false);
-  const icon = TOOL_ICONS[toolCall.toolName] || "🔧";
+// Human-friendly label for a tool call (no JSON, no raw paths)
+function friendlyToolLabel(toolCall: ToolCall): string {
+  const fileName = (p: string) => p.split("/").pop() || p;
+  switch (toolCall.toolName) {
+    case "bash":
+      return `Ran ${toolCall.args.command ? `\`${String(toolCall.args.command).slice(0, 60)}${String(toolCall.args.command).length > 60 ? "…" : ""}\`` : "command"}`;
+    case "read":
+      return `Read ${fileName(toolCall.args.path || "")}`;
+    case "edit":
+      return `Edited ${fileName(toolCall.args.path || "")}`;
+    case "write":
+      return `Wrote ${fileName(toolCall.args.path || "")}`;
+    case "grep":
+      return `Searched for \`${toolCall.args.pattern || "pattern"}\``;
+    case "find":
+    case "ls":
+      return `Listed files`;
+    default:
+      return `${toolCall.toolName}`;
+  }
+}
 
-  // Format args for display
-  const argsPreview = toolCall.toolName === "bash"
-    ? toolCall.args.command || ""
-    : toolCall.toolName === "read"
-      ? toolCall.args.path || ""
-      : toolCall.toolName === "edit"
-        ? toolCall.args.path || ""
-        : toolCall.toolName === "write"
-          ? toolCall.args.path || ""
-          : JSON.stringify(toolCall.args).slice(0, 100);
+// Render friendly expanded details instead of raw JSON
+function FriendlyToolDetails({ toolCall }: { toolCall: ToolCall }) {
+  if (toolCall.toolName === "edit" && toolCall.args.old_string && toolCall.args.new_string) {
+    return (
+      <div className="py-1.5 text-xs font-mono space-y-0">
+        {String(toolCall.args.old_string).split("\n").map((line: string, i: number) => (
+          <div key={`old-${i}`} className="text-foreground/40">- {line}</div>
+        ))}
+        {String(toolCall.args.new_string).split("\n").map((line: string, i: number) => (
+          <div key={`new-${i}`} className="text-foreground/80">+ {line}</div>
+        ))}
+      </div>
+    );
+  }
+  if (toolCall.toolName === "bash" && toolCall.args.command) {
+    return (
+      <div className="py-1.5">
+        <pre className="whitespace-pre-wrap break-words text-foreground/70 text-xs font-mono max-h-[200px] overflow-y-auto overflow-x-hidden max-w-full">
+          {toolCall.args.command}
+        </pre>
+      </div>
+    );
+  }
+  const entries = Object.entries(toolCall.args).filter(([k]) => k !== "path" && k !== "command");
+  if (entries.length === 0) return null;
+  return (
+    <div className="py-1.5 text-xs font-mono text-muted-foreground space-y-0">
+      {entries.map(([key, val]) => (
+        <div key={key} className="truncate">
+          <span className="text-foreground/40">{key}:</span>{" "}
+          <span className="text-foreground/70">{typeof val === "string" ? val.slice(0, 200) : JSON.stringify(val).slice(0, 200)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Single tool call row in the progress rail
+function ToolCallRailItem({ toolCall, isLast }: { toolCall: ToolCall; isLast: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const label = friendlyToolLabel(toolCall);
 
   return (
-    <div className="rounded-lg border border-border/50 bg-background/50 text-xs font-mono overflow-hidden w-full min-w-0">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-muted/50 transition-colors text-left min-w-0"
-      >
-        {toolCall.isRunning ? (
-          <Loader2 className="h-3 w-3 animate-spin text-muted-foreground flex-shrink-0" />
-        ) : toolCall.isError ? (
-          <span className="text-destructive flex-shrink-0">✗</span>
-        ) : (
-          <span className="text-green-500 flex-shrink-0">✓</span>
-        )}
-        <span className="text-muted-foreground flex-shrink-0">{icon}</span>
-        <span className="font-semibold flex-shrink-0">{toolCall.toolName}</span>
-        <span className="text-muted-foreground truncate flex-1">{argsPreview}</span>
-        <span className="text-muted-foreground flex-shrink-0">{expanded ? "▾" : "▸"}</span>
-      </button>
-      {expanded && (
-        <div className="border-t border-border/50">
-          {/* Args */}
-          <div className="px-3 py-2 bg-neutral-900 dark:bg-neutral-950 text-neutral-300">
-            <div className="text-[10px] uppercase tracking-wider text-neutral-500 mb-1">input</div>
-            <pre className="whitespace-pre-wrap break-words text-neutral-100 max-h-[200px] overflow-y-auto overflow-x-hidden max-w-full">
-              {toolCall.toolName === "bash" ? toolCall.args.command : JSON.stringify(toolCall.args, null, 2)}
-            </pre>
-          </div>
-          {/* Result */}
-          {toolCall.result !== undefined && (
-            <div className="px-3 py-2 bg-neutral-900/80 dark:bg-neutral-950/80 text-neutral-300 border-t border-neutral-800">
-              <div className="text-[10px] uppercase tracking-wider text-neutral-500 mb-1">
-                {toolCall.isError ? "error" : "output"}
-              </div>
-              <pre className={cn(
-                "whitespace-pre-wrap break-words max-h-[300px] overflow-y-auto overflow-x-hidden max-w-full",
-                toolCall.isError ? "text-red-400" : "text-neutral-100"
-              )}>
-                {toolCall.result}
-              </pre>
-            </div>
+    <div className="relative flex min-w-0">
+      {/* Vertical rail line */}
+      <div className="flex flex-col items-center flex-shrink-0 w-5">
+        {/* Dot */}
+        <div className="relative flex items-center justify-center w-5 h-5">
+          {toolCall.isRunning ? (
+            // Pulsing hollow dot for running
+            <motion.div
+              className="w-2 h-2 border border-foreground"
+              animate={{ opacity: [1, 1, 0.3, 0.3, 1] }}
+              transition={{ duration: 1, repeat: Infinity, times: [0, 0.25, 0.25, 0.75, 0.75], ease: "linear" }}
+            />
+          ) : toolCall.isError ? (
+            // X mark for error
+            <span className="text-[10px] font-mono font-bold text-foreground leading-none">✗</span>
+          ) : (
+            // Solid dot for success
+            <motion.div
+              className="w-2 h-2 bg-foreground"
+              initial={{ scale: 0 }}
+              animate={{ scale: 1 }}
+              transition={{ duration: 0.15, ease: "easeOut" }}
+            />
           )}
         </div>
-      )}
+        {/* Connecting line */}
+        {!isLast && (
+          <div className="w-px flex-1 bg-border" />
+        )}
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 min-w-0 pb-2">
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="w-full flex items-center gap-1.5 text-left min-w-0 group py-0.5"
+        >
+          <span className="truncate flex-1 text-xs font-mono text-foreground/70 group-hover:text-foreground transition-colors duration-150">
+            {label}
+          </span>
+          <span className="text-foreground/30 flex-shrink-0 text-[10px] font-mono group-hover:text-foreground/60 transition-colors duration-150">
+            {expanded ? "−" : "+"}
+          </span>
+        </button>
+        <AnimatePresence>
+          {expanded && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="overflow-hidden"
+            >
+              <div className="border-l border-border ml-0 pl-3 mt-1 mb-1">
+                <FriendlyToolDetails toolCall={toolCall} />
+                {toolCall.result !== undefined && (
+                  <div className="mt-1 pt-1 border-t border-border/50">
+                    <pre className={cn(
+                      "whitespace-pre-wrap break-words max-h-[300px] overflow-y-auto overflow-x-hidden max-w-full text-xs font-mono",
+                      toolCall.isError ? "text-foreground/50" : "text-foreground/60"
+                    )}>
+                      {toolCall.result}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
     </div>
   );
 }
@@ -470,7 +548,7 @@ function MarkdownBlock({ text, isUser }: { text: string; isUser: boolean }) {
         },
         pre({ children, ...props }) {
           return (
-            <pre className="overflow-x-auto rounded-lg bg-neutral-900 dark:bg-neutral-950 text-neutral-100 p-3 my-2 text-xs max-w-full" {...props}>
+            <pre className="overflow-x-auto rounded-lg bg-neutral-900 dark:bg-neutral-950 p-3 my-2 text-xs max-w-full not-prose" {...props}>
               {children}
             </pre>
           );
@@ -492,14 +570,14 @@ function MarkdownBlock({ text, isUser }: { text: string; isUser: boolean }) {
 
           if (isCodeBlock) {
             return (
-              <code className="font-mono text-xs block whitespace-pre-wrap break-all text-neutral-100" {...props}>
+              <code className="font-mono text-xs block whitespace-pre-wrap break-all text-neutral-200" {...props}>
                 {content}
               </code>
             );
           }
 
           return (
-            <code className="px-1.5 py-0.5 rounded bg-neutral-800 dark:bg-neutral-900 text-neutral-100 font-mono text-xs" {...props}>
+            <code className="px-1.5 py-0.5 rounded bg-neutral-800 dark:bg-neutral-900 text-neutral-200 font-mono text-xs not-prose" {...props}>
               {content}
             </code>
           );
@@ -543,72 +621,110 @@ function groupContentBlocks(blocks: ContentBlock[]): GroupedBlock[] {
   return result;
 }
 
-function ToolCallGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
-  const [expanded, setExpanded] = useState(false);
-
-  // For 1-2 tool calls, render individually (not worth collapsing)
-  if (toolCalls.length <= 2) {
-    return (
-      <>
-        {toolCalls.map((tc) => (
-          <ToolCallBlock key={tc.id} toolCall={tc} />
-        ))}
-      </>
-    );
+// Build natural-language summary of completed tool calls
+function buildToolSummary(toolCalls: ToolCall[]): string {
+  const counts: Record<string, number> = {};
+  for (const tc of toolCalls) {
+    const action = tc.toolName === "bash" ? "ran" : tc.toolName === "read" ? "read" : tc.toolName === "edit" ? "edited" : tc.toolName === "write" ? "wrote" : tc.toolName === "grep" ? "searched" : tc.toolName;
+    counts[action] = (counts[action] || 0) + 1;
   }
+  const parts = Object.entries(counts).map(([action, count]) => {
+    if (action === "read") return `read ${count} file${count > 1 ? "s" : ""}`;
+    if (action === "edited") return `edited ${count} file${count > 1 ? "s" : ""}`;
+    if (action === "wrote") return `wrote ${count} file${count > 1 ? "s" : ""}`;
+    if (action === "ran") return `ran ${count} command${count > 1 ? "s" : ""}`;
+    if (action === "searched") return `${count} search${count > 1 ? "es" : ""}`;
+    return `${count} ${action}`;
+  });
+  return parts.join(", ");
+}
 
-  const doneCount = toolCalls.filter((tc) => !tc.isRunning).length;
-  const total = toolCalls.length;
+function ToolCallGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
+  const [manualExpand, setManualExpand] = useState<boolean | null>(null);
+
   const hasRunning = toolCalls.some((tc) => tc.isRunning);
   const hasError = toolCalls.some((tc) => tc.isError);
-  const activeCall = toolCalls.find((tc) => tc.isRunning);
+  const allDone = !hasRunning;
+  const doneCount = toolCalls.filter((tc) => !tc.isRunning).length;
+  const total = toolCalls.length;
+  const summary = allDone ? buildToolSummary(toolCalls) : "";
 
-  // Build a short preview of the active tool call
-  const activePreview = activeCall
-    ? `${activeCall.toolName} ${
-        activeCall.toolName === "bash"
-          ? activeCall.args.command || ""
-          : activeCall.toolName === "read" || activeCall.toolName === "edit" || activeCall.toolName === "write"
-            ? activeCall.args.path || ""
-            : ""
-      }`.trim()
-    : "";
+  // Auto-expand while running, auto-collapse when done (user can override)
+  const isExpanded = manualExpand !== null ? manualExpand : hasRunning;
 
   return (
-    <div className="rounded-lg border border-border/50 bg-background/50 text-xs font-mono overflow-hidden w-full min-w-0">
+    <div className="w-full min-w-0">
+      {/* Header bar — clickable to toggle */}
       <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-muted/50 transition-colors text-left min-w-0"
+        onClick={() => setManualExpand(isExpanded ? false : true)}
+        className="w-full flex items-center gap-2 py-1 text-left min-w-0 group"
       >
-        {hasRunning ? (
-          <Loader2 className="h-3 w-3 animate-spin text-muted-foreground flex-shrink-0" />
-        ) : hasError ? (
-          <span className="text-destructive flex-shrink-0">✗</span>
-        ) : (
-          <span className="text-green-500 flex-shrink-0">✓</span>
-        )}
-        <span className="font-semibold flex-shrink-0">
-          {total} steps{hasRunning ? ` (${doneCount}/${total})` : ""}
+        {/* Status indicator */}
+        <span className="flex-shrink-0 text-xs font-mono text-foreground/40">
+          {hasRunning ? (
+            <motion.span
+              className="inline-block"
+              animate={{ opacity: [1, 1, 0.3, 0.3, 1] }}
+              transition={{ duration: 1, repeat: Infinity, times: [0, 0.25, 0.25, 0.75, 0.75], ease: "linear" }}
+            >
+              [{doneCount}/{total}]
+            </motion.span>
+          ) : (
+            <span>[{total}]</span>
+          )}
         </span>
-        {!expanded && activePreview && (
-          <span className="text-muted-foreground truncate flex-1">{activePreview}</span>
-        )}
-        {!activePreview && <span className="flex-1" />}
-        <span className="text-muted-foreground flex-shrink-0">{expanded ? "▾" : "▸"}</span>
+
+        {/* Summary text */}
+        <span className="truncate flex-1 text-xs font-mono text-foreground/50 group-hover:text-foreground/80 transition-colors duration-150">
+          {hasRunning
+            ? friendlyToolLabel(toolCalls.find((tc) => tc.isRunning)!)
+            : summary || `${total} steps`
+          }
+          {hasError && allDone && (
+            <span className="ml-1.5 text-foreground/30">· {toolCalls.filter(tc => tc.isError).length} failed</span>
+          )}
+        </span>
+
+        {/* Expand chevron */}
+        <span className="flex-shrink-0 text-[10px] font-mono text-foreground/30 group-hover:text-foreground/60 transition-colors duration-150">
+          {isExpanded ? "▾" : "▸"}
+        </span>
       </button>
-      {expanded && (
-        <div className="border-t border-border/50 space-y-1 p-2">
-          {toolCalls.map((tc) => (
-            <ToolCallBlock key={tc.id} toolCall={tc} />
-          ))}
-        </div>
-      )}
+
+      {/* Expanded rail view */}
+      <AnimatePresence>
+        {isExpanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            className="overflow-hidden"
+          >
+            <div className="pl-1 pt-1">
+              {toolCalls.map((tc, i) => (
+                <motion.div
+                  key={tc.id}
+                  initial={{ opacity: 0, x: -8 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ duration: 0.15, delay: i * 0.03 }}
+                >
+                  <ToolCallRailItem
+                    toolCall={tc}
+                    isLast={i === toolCalls.length - 1}
+                  />
+                </motion.div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
 
 // Renders message content with interleaved text and tool call blocks
-function MessageContent({ message }: { message: Message }) {
+function MessageContent({ message, onImageClick }: { message: Message; onImageClick?: (images: string[], index: number) => void }) {
   const isUser = message.role === "user";
 
   // If we have content blocks (Pi messages with tool calls), render them in order
@@ -633,12 +749,19 @@ function MessageContent({ message }: { message: Message }) {
     );
   }
 
-  // Render attached image thumbnails for user messages
+  // Render attached image thumbnails for user messages — larger, ChatGPT-style; click to open viewer
   const imageThumbs = isUser && message.images && message.images.length > 0 ? (
-    <div className="flex gap-1.5 flex-wrap">
+    <div className="flex gap-2 flex-wrap">
       {message.images.map((img, i) => (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img key={i} src={img} alt={`Attached ${i + 1}`} className="max-w-[120px] max-h-[80px] rounded border border-background/20 object-cover" />
+        <button
+          key={i}
+          type="button"
+          onClick={() => onImageClick?.(message.images ?? [], i)}
+          className="rounded-lg border border-border/50 shadow-sm overflow-hidden p-0 block text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={img} alt={`Attached ${i + 1}`} className="max-w-[200px] max-h-[160px] min-h-[80px] w-full object-cover cursor-pointer" />
+        </button>
       ))}
     </div>
   ) : null;
@@ -747,6 +870,7 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
   const [prefillSource, setPrefillSource] = useState<string>("search");
   const [prefillFrameId, setPrefillFrameId] = useState<number | null>(null);
   const [pastedImages, setPastedImages] = useState<string[]>([]); // Base64 data URLs
+  const [imageViewer, setImageViewer] = useState<{ images: string[]; index: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const isEmbedded = !!className; // embedded in settings vs overlay panel
 
@@ -1453,6 +1577,9 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
       const providerConfig = buildProviderConfig();
       console.log("[Pi] Preset changed, restarting:", providerConfig?.provider, providerConfig?.model);
       piRunningConfigRef.current = { provider: activePreset.provider, model: activePreset.model, token: currentToken };
+      // Reset session sync flag — Pi restarts fresh without conversation context,
+      // so the next message will re-inject chat history.
+      piSessionSyncedRef.current = false;
       commands.piUpdateConfig(settings.user?.token ?? null, providerConfig).catch((e) => {
         console.error("[Pi] Preset switch failed:", e);
       });
@@ -2971,7 +3098,7 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
                     : "bg-muted/30 border-border/50"
                 )}
               >
-                <MessageContent message={message} />
+                <MessageContent message={message} onImageClick={(images, index) => setImageViewer({ images, index })} />
                 {/* Upgrade button for daily limit errors */}
                 {message.role === "assistant" &&
                  (message.content.includes("used all your free queries") ||
@@ -3089,6 +3216,177 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
       {/* Input */}
       <div className="relative border-t border-border/50 bg-gradient-to-t from-muted/20 to-transparent">
         <div className="max-w-4xl mx-auto w-full">
+        {/* Prefill, filters, suggestions first; then attached images in gap; then agent bar; then form */}
+        {/* Prefill context indicator from search */}
+        {(prefillContext || prefillFrameId) && (
+          <div className="px-3 py-2 border-b border-border/30 bg-muted/30">
+            <div className="flex items-start justify-between gap-2">
+              {prefillFrameId && (
+                <div className="flex-shrink-0">
+                  <div className="relative group">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={`http://localhost:3030/frames/${prefillFrameId}`}
+                      alt="Attached frame"
+                      className="w-16 h-12 object-cover rounded border border-border/50"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setPrefillFrameId(null)}
+                      className="absolute -top-1 -right-1 p-0.5 bg-background rounded-full border border-border shadow-sm opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
+                      <X className="w-2.5 h-2.5 text-muted-foreground" />
+                    </button>
+                  </div>
+                </div>
+              )}
+              {prefillContext && (
+                <div className="flex-1 min-w-0">
+                  <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-1">
+                    context from {prefillSource === "timeline" ? "timeline selection" : "search"}
+                  </div>
+                  <p className="text-xs text-foreground font-mono line-clamp-2">
+                    {prefillContext.slice(0, 150)}{prefillContext.length > 150 ? "..." : ""}
+                  </p>
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setPrefillContext(null);
+                  setPrefillFrameId(null);
+                }}
+                className="p-1 hover:bg-muted rounded text-muted-foreground"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Active filters chips */}
+        {hasActiveFilters && (
+          <div className="px-3 py-2 border-b border-border/30 flex flex-wrap gap-1.5">
+            {activeFilters.timeRanges.map((range, idx) => (
+              <button
+                key={`time-${idx}`}
+                type="button"
+                onClick={() => removeFilter("time", range.label)}
+                className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 rounded-full hover:bg-blue-500/20 transition-colors"
+              >
+                <span>🕐</span>
+                <span>{range.label}</span>
+                <X className="w-2.5 h-2.5 ml-0.5" />
+              </button>
+            ))}
+            {activeFilters.contentType && (
+              <button
+                type="button"
+                onClick={() => removeFilter("content")}
+                className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 rounded-full hover:bg-purple-500/20 transition-colors"
+              >
+                <span>{activeFilters.contentType === "audio" ? "🎤" : "🖥️"}</span>
+                <span>{activeFilters.contentType}</span>
+                <X className="w-2.5 h-2.5 ml-0.5" />
+              </button>
+            )}
+            {activeFilters.appName && (
+              <button
+                type="button"
+                onClick={() => removeFilter("app")}
+                className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium bg-green-500/10 text-green-600 dark:text-green-400 border border-green-500/20 rounded-full hover:bg-green-500/20 transition-colors"
+              >
+                <span>📱</span>
+                <span>{activeFilters.appName}</span>
+                <X className="w-2.5 h-2.5 ml-0.5" />
+              </button>
+            )}
+            {activeFilters.speakerName && (
+              <button
+                type="button"
+                onClick={() => removeFilter("speaker")}
+                className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium bg-orange-500/10 text-orange-600 dark:text-orange-400 border border-orange-500/20 rounded-full hover:bg-orange-500/20 transition-colors"
+              >
+                <span>👤</span>
+                <span>{activeFilters.speakerName}</span>
+                <X className="w-2.5 h-2.5 ml-0.5" />
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Follow-up suggestions (TikTok-style) */}
+        <AnimatePresence>
+          {!isLoading && followUpSuggestions.length > 0 && messages.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              transition={{ duration: 0.2 }}
+              className="px-3 pt-2 flex flex-col gap-1"
+            >
+              <span className="text-[10px] text-muted-foreground/60 uppercase tracking-wider font-medium">follow up</span>
+              <div className="flex flex-wrap gap-1.5">
+                {followUpSuggestions.map((q, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => sendMessage(q)}
+                    className="px-2.5 py-1 text-[11px] bg-primary/10 hover:bg-primary/20 rounded-full border border-primary/20 hover:border-primary/40 text-primary hover:text-primary transition-colors cursor-pointer"
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Auto-suggestions above input */}
+        {messages.length > 0 && !isLoading && autoSuggestions.length > 0 && (
+          <div className="px-3 pt-2 flex flex-wrap gap-1.5">
+            {autoSuggestions.slice(0, 3).map((s, i) => (
+              <button
+                key={i}
+                type="button"
+                onClick={() => sendMessage(s.text)}
+                className="px-2.5 py-1 text-[11px] bg-muted/20 hover:bg-muted/50 rounded-full border border-border/20 hover:border-border/50 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+              >
+                {s.text}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Attached images in the gap (above agent bar, like reference); click to open full-screen viewer */}
+        {pastedImages.length > 0 && (
+          <div className="px-3 py-2 border-b border-border/30 flex flex-wrap items-center gap-2">
+            {pastedImages.map((img, i) => (
+              <div key={i} className="relative group shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setImageViewer({ images: pastedImages, index: i })}
+                  className="block rounded-lg border border-border/50 shadow-sm overflow-hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={img}
+                    alt={`Attached ${i + 1}`}
+                    className="h-20 w-20 min-h-20 min-w-20 object-cover cursor-pointer"
+                  />
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); setPastedImages(prev => prev.filter((_, idx) => idx !== i)); }}
+                  className="absolute -top-1.5 -right-1.5 w-6 h-6 bg-destructive text-destructive-foreground rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-md hover:bg-destructive/90"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div className="p-2 border-b border-border/30 flex items-center gap-2">
           <Popover open={appFilterOpen} onOpenChange={setAppFilterOpen}>
             <PopoverTrigger asChild>
@@ -3259,147 +3557,6 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
           </div>
         </div>
 
-        {/* Prefill context indicator from search */}
-        {(prefillContext || prefillFrameId) && (
-          <div className="px-3 py-2 border-b border-border/30 bg-muted/30">
-            <div className="flex items-start justify-between gap-2">
-              {prefillFrameId && (
-                <div className="flex-shrink-0">
-                  <div className="relative group">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={`http://localhost:3030/frames/${prefillFrameId}`}
-                      alt="Attached frame"
-                      className="w-16 h-12 object-cover rounded border border-border/50"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setPrefillFrameId(null)}
-                      className="absolute -top-1 -right-1 p-0.5 bg-background rounded-full border border-border shadow-sm opacity-0 group-hover:opacity-100 transition-opacity"
-                    >
-                      <X className="w-2.5 h-2.5 text-muted-foreground" />
-                    </button>
-                  </div>
-                </div>
-              )}
-              {prefillContext && (
-                <div className="flex-1 min-w-0">
-                  <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-1">
-                    context from {prefillSource === "timeline" ? "timeline selection" : "search"}
-                  </div>
-                  <p className="text-xs text-foreground font-mono line-clamp-2">
-                    {prefillContext.slice(0, 150)}{prefillContext.length > 150 ? "..." : ""}
-                  </p>
-                </div>
-              )}
-              <button
-                type="button"
-                onClick={() => {
-                  setPrefillContext(null);
-                  setPrefillFrameId(null);
-                }}
-                className="p-1 hover:bg-muted rounded text-muted-foreground"
-              >
-                <X className="w-3 h-3" />
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Active filters chips */}
-        {hasActiveFilters && (
-          <div className="px-3 py-2 border-b border-border/30 flex flex-wrap gap-1.5">
-            {activeFilters.timeRanges.map((range, idx) => (
-              <button
-                key={`time-${idx}`}
-                type="button"
-                onClick={() => removeFilter("time", range.label)}
-                className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 rounded-full hover:bg-blue-500/20 transition-colors"
-              >
-                <span>🕐</span>
-                <span>{range.label}</span>
-                <X className="w-2.5 h-2.5 ml-0.5" />
-              </button>
-            ))}
-            {activeFilters.contentType && (
-              <button
-                type="button"
-                onClick={() => removeFilter("content")}
-                className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 rounded-full hover:bg-purple-500/20 transition-colors"
-              >
-                <span>{activeFilters.contentType === "audio" ? "🎤" : "🖥️"}</span>
-                <span>{activeFilters.contentType}</span>
-                <X className="w-2.5 h-2.5 ml-0.5" />
-              </button>
-            )}
-            {activeFilters.appName && (
-              <button
-                type="button"
-                onClick={() => removeFilter("app")}
-                className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium bg-green-500/10 text-green-600 dark:text-green-400 border border-green-500/20 rounded-full hover:bg-green-500/20 transition-colors"
-              >
-                <span>📱</span>
-                <span>{activeFilters.appName}</span>
-                <X className="w-2.5 h-2.5 ml-0.5" />
-              </button>
-            )}
-            {activeFilters.speakerName && (
-              <button
-                type="button"
-                onClick={() => removeFilter("speaker")}
-                className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium bg-orange-500/10 text-orange-600 dark:text-orange-400 border border-orange-500/20 rounded-full hover:bg-orange-500/20 transition-colors"
-              >
-                <span>👤</span>
-                <span>{activeFilters.speakerName}</span>
-                <X className="w-2.5 h-2.5 ml-0.5" />
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Follow-up suggestions (TikTok-style) */}
-        <AnimatePresence>
-          {!isLoading && followUpSuggestions.length > 0 && messages.length > 0 && (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 8 }}
-              transition={{ duration: 0.2 }}
-              className="px-3 pt-2 flex flex-col gap-1"
-            >
-              <span className="text-[10px] text-muted-foreground/60 uppercase tracking-wider font-medium">follow up</span>
-              <div className="flex flex-wrap gap-1.5">
-                {followUpSuggestions.map((q, i) => (
-                  <button
-                    key={i}
-                    type="button"
-                    onClick={() => sendMessage(q)}
-                    className="px-2.5 py-1 text-[11px] bg-primary/10 hover:bg-primary/20 rounded-full border border-primary/20 hover:border-primary/40 text-primary hover:text-primary transition-colors cursor-pointer"
-                  >
-                    {q}
-                  </button>
-                ))}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Auto-suggestions above input */}
-        {messages.length > 0 && !isLoading && autoSuggestions.length > 0 && (
-          <div className="px-3 pt-2 flex flex-wrap gap-1.5">
-            {autoSuggestions.slice(0, 3).map((s, i) => (
-              <button
-                key={i}
-                type="button"
-                onClick={() => sendMessage(s.text)}
-                className="px-2.5 py-1 text-[11px] bg-muted/20 hover:bg-muted/50 rounded-full border border-border/20 hover:border-border/50 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
-              >
-                {s.text}
-              </button>
-            ))}
-          </div>
-        )}
-
         <form
           onSubmit={handleSubmit}
           className="p-3 relative"
@@ -3424,8 +3581,15 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
               )}
             </AnimatePresence>
           )}
-          <div className="flex gap-2 items-end">
-            <div className="relative flex-1">
+          <div
+            className={cn(
+              "flex flex-col rounded-lg border bg-input ring-offset-background transition-colors focus-within:border-foreground focus-within:ring-foreground/10 focus-within:ring-1",
+              "bg-background/50 border-border/50",
+              disabledReason && "border-muted-foreground/30"
+            )}
+          >
+            {/* Textarea row: full width so scrollbar is above the buttons and no dead zone */}
+            <div className="relative flex-1 min-w-0">
               <textarea
                 ref={inputRef}
                 value={input}
@@ -3438,37 +3602,9 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
                 }
                 disabled={!canChat}
                 rows={1}
-                className={cn(
-                  "flex w-full border border-border bg-input px-3 py-2 text-sm font-mono ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-foreground disabled:cursor-not-allowed disabled:opacity-50 caret-foreground resize-none overflow-y-auto",
-                  "flex-1 bg-background/50 border-border/50 focus:border-foreground/30 focus:ring-foreground/10 transition-colors",
-                  disabledReason && "border-muted-foreground/30",
-                  pastedImages.length > 0 && "pb-12" // Make room for image previews below
-                )}
+                className="w-full min-h-[44px] border-0 bg-transparent px-3 py-2.5 pr-3 text-sm font-mono placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50 caret-foreground resize-none overflow-y-auto scrollbar-minimal"
                 style={{ maxHeight: "150px" }}
               />
-
-              {/* Attached image previews below textarea */}
-              {pastedImages.length > 0 && (
-                <div className="absolute bottom-1 left-2 right-2 flex items-center gap-1.5 overflow-x-auto py-1">
-                  {pastedImages.map((img, i) => (
-                    <div key={i} className="relative group shrink-0">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={img}
-                        alt={`Attached ${i + 1}`}
-                        className="h-8 w-8 object-cover rounded border border-border/50"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setPastedImages(prev => prev.filter((_, idx) => idx !== i))}
-                        className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-destructive text-destructive-foreground rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                      >
-                        <X className="w-2.5 h-2.5" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
 
               <AnimatePresence>
                 {showMentionDropdown && filteredMentions.length > 0 && (
@@ -3520,35 +3656,38 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
                 )}
               </AnimatePresence>
             </div>
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              onClick={handleFilePicker}
-              disabled={isLoading || !canChat}
-              className="shrink-0 text-muted-foreground hover:text-foreground"
-              title="Attach image"
-            >
-              <Paperclip className="h-4 w-4" />
-            </Button>
-            <Button
-              type={isStreaming ? "button" : "submit"}
-              size="icon"
-              disabled={(!input.trim() && !isStreaming && pastedImages.length === 0) || !canChat}
-              onClick={isStreaming ? handleStop : undefined}
-              className={cn(
-                "shrink-0 transition-all duration-200",
-                isStreaming
-                  ? "bg-foreground text-background hover:bg-foreground/80"
-                  : "bg-foreground text-background hover:bg-background hover:text-foreground"
-              )}
-            >
-              {isStreaming ? (
-                <Square className="h-4 w-4" />
-              ) : (
-                <Send className="h-4 w-4" />
-              )}
-            </Button>
+            {/* Buttons row below textarea so scrollbar is above and full width is typeable */}
+            <div className="flex items-center justify-end gap-0.5 shrink-0 px-2 pb-2 pt-1">
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                onClick={handleFilePicker}
+                disabled={isLoading || !canChat}
+                className="h-8 w-8 text-muted-foreground hover:text-foreground hover:bg-muted/50"
+                title="Attach image"
+              >
+                <Paperclip className="h-4 w-4" />
+              </Button>
+              <Button
+                type={isStreaming ? "button" : "submit"}
+                size="icon"
+                disabled={(!input.trim() && !isStreaming && pastedImages.length === 0) || !canChat}
+                onClick={isStreaming ? handleStop : undefined}
+                className={cn(
+                  "h-8 w-8 transition-all duration-200",
+                  isStreaming
+                    ? "bg-foreground text-background hover:bg-foreground/80"
+                    : "bg-foreground text-background hover:bg-background hover:text-foreground"
+                )}
+              >
+                {isStreaming ? (
+                  <Square className="h-4 w-4" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
+              </Button>
+            </div>
           </div>
         </form>
       </div> {/* End of max-w-4xl input wrapper */}
@@ -3576,6 +3715,72 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
           responsePreview={scheduleDialogMessage.response}
         />
       )}
+
+      {/* Full-screen image viewer (like reference): click any attached photo to open */}
+      <Dialog open={!!imageViewer} onOpenChange={(open) => !open && setImageViewer(null)}>
+        <DialogContent
+          hideCloseButton
+          className="fixed inset-0 z-50 max-w-none w-full h-full !left-0 !top-0 !translate-x-0 !translate-y-0 rounded-none border-0 bg-muted/95 p-0 flex flex-col gap-0"
+        >
+          {imageViewer && (
+            <>
+              <div className="flex items-center justify-between px-4 py-3 border-b border-border/50 shrink-0">
+                <span className="text-sm font-medium text-muted-foreground">
+                  {imageViewer.index + 1}/{imageViewer.images.length} Attached image {imageViewer.index + 1}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setImageViewer(null)}
+                  className="p-2 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                  aria-label="Close"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+              <div className="flex-1 flex items-center justify-center min-h-0 p-4 bg-background/50">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={imageViewer.images[imageViewer.index]}
+                  alt={`Attached image ${imageViewer.index + 1}`}
+                  className="max-w-full max-h-full object-contain rounded-lg"
+                />
+              </div>
+              <div className="flex items-center justify-center gap-4 py-3 border-t border-border/50 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setImageViewer((v) => v && v.index > 0 ? { ...v, index: v.index - 1 } : v)}
+                  disabled={imageViewer.index === 0}
+                  className="p-2 rounded-md hover:bg-muted disabled:opacity-40 disabled:pointer-events-none text-foreground"
+                  aria-label="Previous image"
+                >
+                  <ChevronLeft className="h-5 w-5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setImageViewer((v) => v && v.index < v.images.length - 1 ? { ...v, index: v.index + 1 } : v)}
+                  disabled={imageViewer.index === imageViewer.images.length - 1}
+                  className="p-2 rounded-md hover:bg-muted disabled:opacity-40 disabled:pointer-events-none text-foreground"
+                  aria-label="Next image"
+                >
+                  <ChevronRight className="h-5 w-5" />
+                </button>
+              </div>
+              <div className="flex justify-center gap-1.5 pb-3">
+                {imageViewer.images.map((_, i) => (
+                  <div
+                    key={i}
+                    className={cn(
+                      "w-2 h-2 rounded-full transition-colors",
+                      i === imageViewer.index ? "bg-foreground" : "bg-muted-foreground/40"
+                    )}
+                    aria-hidden
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

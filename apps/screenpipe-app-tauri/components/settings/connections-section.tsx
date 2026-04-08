@@ -4,6 +4,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { apiCache } from "@/lib/cache";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -163,6 +164,7 @@ function CursorLogo({ className }: { className?: string }) {
   );
 }
 
+
 function IntegrationIcon({ icon }: { icon: string }) {
   const icons: Record<string, React.ReactNode> = {
     claude: <ClaudeLogo />,
@@ -207,6 +209,7 @@ function IntegrationIcon({ icon }: { icon: string }) {
       </svg>
     ),
     anythingllm: <img src="/images/anythingllm.png" alt="AnythingLLM" className="w-5 h-5 rounded" />,
+    msty: <img src="/images/msty.webp" alt="Msty" className="w-5 h-5 rounded" />,
     ollama: <img src="/images/ollama.png" alt="Ollama" className="w-5 h-5 rounded" />,
     lmstudio: <img src="/images/lmstudio.png" alt="LM Studio" className="w-5 h-5 rounded" />,
     whatsapp: <img src="/images/whatsapp.svg" alt="WhatsApp" className="w-5 h-5" />,
@@ -463,6 +466,47 @@ function AnythingLLMPanel() {
   );
 }
 
+function MstyPanel() {
+  const [copied, setCopied] = useState(false);
+  const config = JSON.stringify({
+    command: "npx",
+    args: ["-y", "screenpipe-mcp"],
+  }, null, 2);
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(config);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {}
+  }, [config]);
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        Give Msty access to your screen &amp; audio history via MCP.
+      </p>
+      <p className="text-xs text-muted-foreground">
+        1. Open Msty and go to <strong>Settings</strong> &gt; <strong>Toolbox</strong>
+      </p>
+      <p className="text-xs text-muted-foreground">
+        2. Click <strong>Add New Tool</strong>, select <strong>STDIO / JSON</strong>, and paste this config:
+      </p>
+      <div className="relative group">
+        <pre className="bg-muted border border-border rounded-lg p-3 pr-10 text-xs font-mono text-foreground overflow-x-auto whitespace-pre-wrap">{config}</pre>
+        <Button variant="ghost" size="sm" onClick={handleCopy} className="absolute top-2 right-2 h-6 w-6 p-0 opacity-0 group-hover:opacity-100 transition-opacity">
+          {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3 text-muted-foreground" />}
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        3. Give the tool a name (e.g. <strong>screenpipe</strong>) and click <strong>Add</strong>
+      </p>
+      <Button variant="outline" onClick={() => openUrl("https://msty.app")} size="sm" className="gap-1.5 h-7 text-xs normal-case font-sans tracking-normal">
+        <ExternalLink className="h-3 w-3" />open msty
+      </Button>
+    </div>
+  );
+}
+
 function OllamaPanel() {
   const [status, setStatus] = useState<"idle" | "checking" | "connected" | "error">("idle");
   const [models, setModels] = useState<string[]>([]);
@@ -642,6 +686,7 @@ function WhatsAppPanel() {
 
   const handleDisconnect = async () => {
     await fetch("http://localhost:3030/connections/whatsapp/disconnect", { method: "POST" });
+    apiCache.invalidate("connections/list");
     setStatus("idle");
     setQr(null);
     setInfo(null);
@@ -798,6 +843,7 @@ function ApiIntegrationPanel({ integration, onRefresh }: {
       const saveData = await saveRes.json();
       if (!saveRes.ok || saveData.error) throw new Error(saveData.error || "save failed");
       setStatus("idle");
+      apiCache.invalidate("connections/list");
       onRefresh();
     } catch (e: any) {
       setError(e?.message || "unknown error");
@@ -809,6 +855,7 @@ function ApiIntegrationPanel({ integration, onRefresh }: {
     try {
       await fetch(`http://localhost:3030/connections/${integration.id}`, { method: "DELETE" });
       setCreds({});
+      apiCache.invalidate("connections/list");
       onRefresh();
     } catch { /* ignore */ }
   };
@@ -933,11 +980,21 @@ export function ConnectionsSection() {
   useEffect(() => { refreshStatus(); }, [selected, refreshStatus]);
 
   const fetchIntegrations = useCallback(async (retries = 3) => {
+    const cacheKey = "connections/list";
+    // Show cached data if fresh (< 30s) — avoids showing stale connection status
+    const cached = apiCache.get<any[]>(cacheKey);
+    if (cached) {
+      setIntegrations(cached);
+      setIntegrationsLoaded(true);
+      return;
+    }
+
     for (let i = 0; i < retries; i++) {
       try {
         const res = await fetch("http://localhost:3030/connections");
         const data = await res.json();
         if (data.data) {
+          apiCache.set(cacheKey, data.data, 30_000); // 30s TTL
           setIntegrations(data.data);
           setIntegrationsLoaded(true);
           return;
@@ -966,6 +1023,7 @@ export function ConnectionsSection() {
       { id: "anythingllm", name: "AnythingLLM", icon: "anythingllm", connected: false },
       { id: "ollama", name: "Ollama", icon: "ollama", connected: false },
       { id: "lmstudio", name: "LM Studio", icon: "lmstudio", connected: false },
+      { id: "msty", name: "Msty", icon: "msty", connected: false },
       { id: "obsidian", name: "Obsidian", icon: "obsidian", connected: false },
       { id: "notion", name: "Notion", icon: "notion", connected: false },
       { id: "linear", name: "Linear", icon: "linear", connected: false },
@@ -1008,6 +1066,7 @@ export function ConnectionsSection() {
       case "anythingllm": return <AnythingLLMPanel />;
       case "ollama": return <OllamaPanel />;
       case "lmstudio": return <LMStudioPanel />;
+      case "msty": return <MstyPanel />;
       default:
         if (selectedIntegration) {
           return <ApiIntegrationPanel integration={selectedIntegration} onRefresh={fetchIntegrations} />;
@@ -1027,11 +1086,6 @@ export function ConnectionsSection() {
 
   return (
     <div className="space-y-5">
-      <div className="space-y-1">
-        <h1 className="text-xl font-bold tracking-tight text-foreground">Connections</h1>
-        <p className="text-muted-foreground text-sm">Give AI access to your memory, and connect to the apps you use every day</p>
-      </div>
-
       {/* Search */}
       <div className="relative">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />

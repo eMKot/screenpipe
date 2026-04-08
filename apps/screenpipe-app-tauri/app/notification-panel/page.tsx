@@ -9,6 +9,7 @@ import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import posthog from "posthog-js";
 import ReactMarkdown from "react-markdown";
+import { showChatWithPrefill } from "@/lib/chat-utils";
 
 interface NotificationAction {
   label: string;
@@ -29,6 +30,10 @@ export default function NotificationPanelPage() {
   const [payload, setPayload] = useState<NotificationPayload | null>(null);
   const [visible, setVisible] = useState(false);
   const [progress, setProgress] = useState(100);
+  const [restartState, setRestartState] = useState<
+    "idle" | "restarting" | "success" | "error"
+  >("idle");
+  const [restartError, setRestartError] = useState<string | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoDismissMsRef = useRef(20000);
 
@@ -67,8 +72,60 @@ export default function NotificationPanelPage() {
         } else if (action === "open_chat") {
           await invoke("show_window", { window: "Chat" });
         } else if (action === "open_pipe_suggestions") {
-          await invoke("show_window", { window: "Main" });
-          await emit("open-pipe-suggestions", {});
+          await showChatWithPrefill({
+            context: PIPE_SUGGESTION_PROMPT,
+            prompt: "what pipes should i create based on my recent activity?",
+            autoSend: true,
+            source: "pipe-suggestion-notification",
+          });
+        } else if (action === "restart_recording") {
+          setRestartState("restarting");
+          setRestartError(null);
+          // Pause auto-dismiss while restarting
+          if (intervalRef.current) {
+            clearInterval(intervalRef.current);
+            intervalRef.current = null;
+          }
+          try {
+            try {
+              await invoke("stop_screenpipe");
+            } catch {
+              // may already be stopped
+            }
+            await new Promise((r) => setTimeout(r, 2000));
+            await invoke("spawn_screenpipe");
+            // Poll health endpoint to confirm restart succeeded
+            let healthy = false;
+            for (let i = 0; i < 15; i++) {
+              await new Promise((r) => setTimeout(r, 1000));
+              try {
+                const res = await fetch("http://localhost:3030/health");
+                if (res.ok) {
+                  healthy = true;
+                  break;
+                }
+              } catch {
+                // server not up yet
+              }
+            }
+            if (healthy) {
+              setRestartState("success");
+              await new Promise((r) => setTimeout(r, 2000));
+              try {
+                await hide(false);
+              } catch {
+                // fallback: force-hide via invoke directly
+                try { await invoke("hide_notification_panel"); } catch {}
+              }
+            } else {
+              setRestartState("error");
+              setRestartError("server did not respond after restart");
+            }
+          } catch (e) {
+            setRestartState("error");
+            setRestartError(String(e));
+          }
+          return; // don't auto-hide on error so user sees the message
         }
       } catch {
         // ignore
@@ -87,6 +144,8 @@ export default function NotificationPanelPage() {
         setPayload(data);
         setVisible(true);
         setProgress(100);
+        setRestartState("idle");
+        setRestartError(null);
 
         posthog.capture("notification_shown", {
           type: data.type,
@@ -259,35 +318,70 @@ export default function NotificationPanelPage() {
               flexWrap: "wrap",
             }}
           >
-            {payload.actions.map((action) => (
-              <button
-                key={action.action}
-                onClick={() => handleAction(action.action)}
+            {restartState === "restarting" ? (
+              <span
                 style={{
-                  background: action.primary
-                    ? "rgba(0, 0, 0, 0.06)"
-                    : "none",
-                  border: "1px solid rgba(0, 0, 0, 0.12)",
-                  color: "rgba(0, 0, 0, 0.75)",
-                  cursor: "pointer",
-                  padding: "4px 10px",
                   fontSize: "10px",
+                  color: "rgba(0, 0, 0, 0.5)",
                   fontFamily: '"IBM Plex Mono", monospace',
                   fontWeight: 500,
-                  letterSpacing: "0.03em",
                 }}
-                onMouseEnter={(e) =>
-                  (e.currentTarget.style.background = "rgba(0, 0, 0, 0.08)")
-                }
-                onMouseLeave={(e) =>
-                  (e.currentTarget.style.background = action.primary
-                    ? "rgba(0, 0, 0, 0.06)"
-                    : "none")
-                }
               >
-                {action.label}
-              </button>
-            ))}
+                restarting...
+              </span>
+            ) : restartState === "success" ? (
+              <span
+                style={{
+                  fontSize: "10px",
+                  color: "rgba(0, 0, 0, 0.7)",
+                  fontFamily: '"IBM Plex Mono", monospace',
+                  fontWeight: 500,
+                }}
+              >
+                restarted successfully
+              </span>
+            ) : restartState === "error" ? (
+              <span
+                style={{
+                  fontSize: "10px",
+                  color: "rgba(0, 0, 0, 0.7)",
+                  fontFamily: '"IBM Plex Mono", monospace',
+                  fontWeight: 500,
+                }}
+              >
+                restart failed{restartError ? `: ${restartError}` : ""}
+              </span>
+            ) : (
+              payload.actions.map((action) => (
+                <button
+                  key={action.action}
+                  onClick={() => handleAction(action.action)}
+                  style={{
+                    background: action.primary
+                      ? "rgba(0, 0, 0, 0.06)"
+                      : "none",
+                    border: "1px solid rgba(0, 0, 0, 0.12)",
+                    color: "rgba(0, 0, 0, 0.75)",
+                    cursor: "pointer",
+                    padding: "4px 10px",
+                    fontSize: "10px",
+                    fontFamily: '"IBM Plex Mono", monospace',
+                    fontWeight: 500,
+                    letterSpacing: "0.03em",
+                  }}
+                  onMouseEnter={(e) =>
+                    (e.currentTarget.style.background = "rgba(0, 0, 0, 0.08)")
+                  }
+                  onMouseLeave={(e) =>
+                    (e.currentTarget.style.background = action.primary
+                      ? "rgba(0, 0, 0, 0.06)"
+                      : "none")
+                  }
+                >
+                  {action.label}
+                </button>
+              ))
+            )}
             <span
               onClick={() => hide(false)}
               style={{
@@ -333,3 +427,33 @@ export default function NotificationPanelPage() {
     </div>
   );
 }
+
+const PIPE_SUGGESTION_PROMPT = `you are a screenpipe automation advisor. the user wants ideas for pipes (scheduled AI agents) they can create based on their actual workflow.
+
+## what is screenpipe?
+
+screenpipe is a desktop app that continuously captures screen text (via accessibility APIs) and audio (transcription).
+it runs a local API at http://localhost:3030 that lets you query everything you've seen, said, or heard.
+
+## what is a pipe?
+
+a pipe is a scheduled AI agent defined as a single markdown file: ~/.screenpipe/pipes/{name}/pipe.md
+every N minutes, screenpipe runs a coding agent with the pipe's prompt.
+the agent can query screen data, write files, call external APIs, send notifications, etc.
+
+## your task
+
+1. first, query the user's recent screen data from the last 24 hours:
+   curl "http://localhost:3030/search?limit=50&content_type=all&start_time=<24h_ago_ISO>&end_time=<now_ISO>"
+
+2. analyze what apps they use, what they work on, what patterns you see
+
+3. suggest 3-5 specific, practical pipe ideas based on their ACTUAL data. each suggestion should:
+   - have a short name
+   - explain what it automates in one sentence
+   - mention which APIs or tools it would connect to
+   - be something they'd actually want running daily/hourly
+
+focus on things like: summarizing meetings, tracking time on projects, syncing notes, monitoring specific topics, auto-journaling, sending digest emails, etc.
+
+be specific to what you see in their data — not generic suggestions.`;

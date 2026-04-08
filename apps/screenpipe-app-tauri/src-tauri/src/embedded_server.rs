@@ -18,7 +18,7 @@ use screenpipe_engine::{
     analytics,
     hot_frame_cache::HotFrameCache,
     server::bind_listener,
-    start_meeting_watcher, start_power_manager, start_sleep_monitor, start_ui_recording,
+    start_meeting_watcher, start_power_manager_with_pref, start_sleep_monitor, start_ui_recording,
     vision_manager::{start_monitor_watcher, stop_monitor_watcher, VisionManager},
     RecordingConfig, ResourceMonitor, SCServer,
 };
@@ -261,8 +261,16 @@ pub async fn start_embedded_server(
     // Create shared pipeline metrics (used by recording + health endpoint + PostHog)
     let vision_metrics = Arc::new(screenpipe_screen::PipelineMetrics::new());
 
-    // Start power manager — polls battery/thermal state and broadcasts profile changes
-    let power_manager = start_power_manager();
+    // Start power manager — polls battery/thermal state and broadcasts profile changes.
+    // Restore user's persisted power mode preference so it survives app restarts.
+    let initial_power_pref = config
+        .power_mode
+        .as_deref()
+        .and_then(|s| serde_json::from_value::<screenpipe_engine::power::PowerMode>(
+            serde_json::Value::String(s.to_string()),
+        ).ok())
+        .unwrap_or_default();
+    let power_manager = start_power_manager_with_pref(initial_power_pref);
 
     // Capture trigger sender — set by VisionManager when vision is enabled.
     // Passed to start_ui_recording so UI events (clicks, app switches) trigger captures.
@@ -351,6 +359,9 @@ pub async fn start_embedded_server(
         None
     };
 
+    // Shared manual meeting lock — used by both the HTTP API and the meeting persister
+    let manual_meeting = std::sync::Arc::new(tokio::sync::RwLock::new(None::<i64>));
+
     // Start meeting watcher (standalone accessibility listener for smart mode)
     // Independent of enable_input_capture/enable_accessibility toggles — only needs accessibility permission
     if let Some(ref detector) = meeting_detector {
@@ -361,7 +372,7 @@ pub async fn start_embedded_server(
 
         // Persist meeting state transitions to DB (was missing — meetings were never saved in desktop app)
         let _meeting_persister =
-            screenpipe_engine::start_meeting_persister(detector.clone(), db.clone());
+            screenpipe_engine::start_meeting_persister(detector.clone(), db.clone(), manual_meeting.clone());
         info!("meeting persister started");
 
         // Bridge calendar events from event bus into meeting detector
@@ -405,6 +416,7 @@ pub async fn start_embedded_server(
     server.audio_metrics = audio_manager.metrics.clone();
     server.hot_frame_cache = Some(hot_frame_cache);
     server.power_manager = Some(power_manager);
+    server.manual_meeting = Some(manual_meeting);
 
     // Initialize pipe manager
     let pipes_dir = config.data_dir.join("pipes");

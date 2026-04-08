@@ -24,17 +24,22 @@ use crate::{
             add_tags, add_to_database, execute_raw_sql, get_tags_batch, merge_frames_handler,
             remove_tags, validate_media_handler,
         },
-        data::delete_time_range_handler,
+        context::{get_context, list_sessions},
+        data::{delete_device_data_handler, delete_time_range_handler, device_storage_handler},
         elements::{get_frame_elements, search_elements},
         frames::{
-            get_frame_context, get_frame_data, get_frame_metadata, get_frame_ocr_data,
+            get_frame_context, get_frame_data, get_frame_metadata, get_frame_text_data,
             get_next_valid_frame, run_frame_ocr,
         },
         health::{
             api_list_monitors, api_vision_status, audio_metrics_handler, health_check,
             vision_metrics_handler,
         },
-        meetings::{get_meeting_handler, list_meetings_handler},
+        meetings::{
+            bulk_delete_meetings_handler, delete_meeting_handler, get_meeting_handler,
+            list_meetings_handler, merge_meetings_handler, start_meeting_handler,
+            stop_meeting_handler, update_meeting_handler,
+        },
         memories::{
             create_memory_handler, delete_memory_handler, get_memory_handler,
             list_memories_handler, update_memory_handler,
@@ -152,6 +157,8 @@ pub struct AppState {
     pub archive_state: crate::archive::ArchiveState,
     /// Vault lock manager — encrypts data at rest when locked
     pub vault: screenpipe_vault::VaultManager,
+    /// Active manually-started meeting id (set via POST /meetings/start, cleared via POST /meetings/stop)
+    pub manual_meeting: Arc<tokio::sync::RwLock<Option<i64>>>,
 }
 
 pub struct SCServer {
@@ -174,6 +181,8 @@ pub struct SCServer {
     /// Shared pipe permission token registry — set before starting so PipeManager can use it.
     pub pipe_permissions:
         Arc<DashMap<String, Arc<screenpipe_core::pipes::permissions::PipePermissions>>>,
+    /// Shared manual meeting lock — pass in from binary so persister and server share the same state.
+    pub manual_meeting: Option<Arc<tokio::sync::RwLock<Option<i64>>>>,
 }
 
 impl SCServer {
@@ -205,6 +214,7 @@ impl SCServer {
             hot_frame_cache: None,
             power_manager: None,
             pipe_permissions: Arc::new(DashMap::new()),
+            manual_meeting: None,
         }
     }
 
@@ -432,6 +442,10 @@ impl SCServer {
             archive_state: crate::archive::ArchiveState::new(),
             pipe_permissions: self.pipe_permissions.clone(),
             vault: screenpipe_vault::VaultManager::new(self.screenpipe_dir.clone()),
+            manual_meeting: self
+                .manual_meeting
+                .clone()
+                .unwrap_or_else(|| Arc::new(tokio::sync::RwLock::new(None))),
         });
 
         let cors = CorsLayer::new()
@@ -450,8 +464,10 @@ impl SCServer {
             .post("/tags/:content_type/:id", add_tags)
             .delete("/tags/:content_type/:id", remove_tags)
             .get("/frames/:frame_id", get_frame_data)
-            .get("/frames/:frame_id/ocr", get_frame_ocr_data)
-            .post("/frames/:frame_id/ocr", run_frame_ocr)
+            .get("/frames/:frame_id/text", get_frame_text_data)
+            .get("/frames/:frame_id/ocr", get_frame_text_data) // deprecated alias
+            .post("/frames/:frame_id/text", run_frame_ocr)
+            .post("/frames/:frame_id/ocr", run_frame_ocr) // deprecated alias
             .get("/frames/:frame_id/context", get_frame_context)
             .get("/frames/:frame_id/metadata", get_frame_metadata)
             .get("/frames/next-valid", get_next_valid_frame)
@@ -468,7 +484,13 @@ impl SCServer {
             .post("/speakers/reassign", reassign_speaker_handler)
             .post("/speakers/undo-reassign", undo_speaker_reassign_handler)
             .get("/meetings", list_meetings_handler)
+            .post("/meetings/merge", merge_meetings_handler)
+            .post("/meetings/bulk-delete", bulk_delete_meetings_handler)
+            .post("/meetings/start", start_meeting_handler)
+            .post("/meetings/stop", stop_meeting_handler)
             .get("/meetings/:id", get_meeting_handler)
+            .delete("/meetings/:id", delete_meeting_handler)
+            .put("/meetings/:id", update_meeting_handler)
             .post("/memories", create_memory_handler)
             .get("/memories", list_memories_handler)
             .get("/memories/:id", get_memory_handler)
@@ -484,6 +506,8 @@ impl SCServer {
             .get("/elements", search_elements)
             .get("/frames/:frame_id/elements", get_frame_elements)
             .get("/activity-summary", get_activity_summary)
+            .get("/context", get_context)
+            .get("/sessions", list_sessions)
             .route_yaml_spec("/openapi.yaml")
             .route_json_spec("/openapi.json")
             .freeze();
@@ -547,6 +571,14 @@ impl SCServer {
                 axum::routing::post(delete_time_range_handler),
             )
             .route(
+                "/data/delete-device",
+                axum::routing::post(delete_device_data_handler),
+            )
+            .route(
+                "/data/device-storage",
+                axum::routing::get(device_storage_handler),
+            )
+            .route(
                 "/audio/retranscribe",
                 axum::routing::post(crate::routes::retranscribe::retranscribe_handler),
             );
@@ -597,6 +629,28 @@ impl SCServer {
                 .route(
                     "/:id/history",
                     axum::routing::delete(crate::pipes_api::clear_pipe_history),
+                )
+                // Store/registry routes (nested under /pipes/store)
+                .route(
+                    "/store",
+                    axum::routing::get(crate::routes::pipe_store::pipe_store_search),
+                )
+                .route(
+                    "/store/publish",
+                    axum::routing::post(crate::routes::pipe_store::pipe_store_publish),
+                )
+                .route(
+                    "/store/install",
+                    axum::routing::post(crate::routes::pipe_store::pipe_store_install),
+                )
+                .route(
+                    "/store/:slug",
+                    axum::routing::get(crate::routes::pipe_store::pipe_store_detail)
+                        .delete(crate::routes::pipe_store::pipe_store_unpublish),
+                )
+                .route(
+                    "/store/:slug/review",
+                    axum::routing::post(crate::routes::pipe_store::pipe_store_review),
                 )
                 .with_state(pm.clone());
             router.nest("/pipes", pipe_routes)

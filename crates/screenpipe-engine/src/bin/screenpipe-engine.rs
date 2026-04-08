@@ -5,7 +5,6 @@
 use clap::Parser;
 #[allow(unused_imports)]
 use colored::Colorize;
-use dirs::home_dir;
 use futures::pin_mut;
 use port_check::is_local_ipv4_port_free;
 use screenpipe_audio::{
@@ -14,6 +13,7 @@ use screenpipe_audio::{
 };
 use screenpipe_core::agents::AgentExecutor;
 use screenpipe_core::find_ffmpeg_path;
+use screenpipe_core::paths;
 use screenpipe_db::DatabaseManager;
 use screenpipe_engine::{
     analytics,
@@ -120,9 +120,7 @@ const DISPLAY: &str = r"
 ";
 
 fn get_base_dir(custom_path: &Option<String>) -> anyhow::Result<PathBuf> {
-    let default_path = home_dir()
-        .ok_or_else(|| anyhow::anyhow!("failed to get home directory"))?
-        .join(".screenpipe");
+    let default_path = paths::default_screenpipe_data_dir();
 
     let base_dir = custom_path
         .as_ref()
@@ -617,6 +615,9 @@ async fn main() -> anyhow::Result<()> {
         Some(hot_frame_cache.clone()),
     );
 
+    // Start background activity session detection (topic clustering)
+    screenpipe_engine::start_activity_sessions(db.clone(), shutdown_tx.subscribe());
+
     // Create VisionManager for event-driven capture on all monitors
     let (handle, capture_trigger_tx) = if !config.disable_vision {
         let vision_config =
@@ -668,6 +669,11 @@ async fn main() -> anyhow::Result<()> {
 
     let local_data_dir_clone_2 = local_data_dir_clone.clone();
 
+    // Shared manual meeting lock — bridges the HTTP meeting routes and the meeting persister
+    // so a manually-started meeting suppresses auto-detection transitions.
+    let manual_meeting: std::sync::Arc<tokio::sync::RwLock<Option<i64>>> =
+        std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
     let mut server = SCServer::new(
         db_server,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
@@ -682,6 +688,7 @@ async fn main() -> anyhow::Result<()> {
     server.audio_metrics = audio_manager.metrics.clone();
     server.hot_frame_cache = Some(hot_frame_cache);
     server.power_manager = Some(power_manager);
+    server.manual_meeting = Some(manual_meeting.clone());
 
     // Attach sync handle if sync is enabled
     let server = if let Some(ref handle) = sync_service_handle {
@@ -1007,9 +1014,9 @@ async fn main() -> anyhow::Result<()> {
         .map(|detector| start_meeting_watcher(detector.clone()));
 
     // Persist meeting state transitions to DB (smart mode only)
-    let _meeting_persister_handle = meeting_detector
-        .as_ref()
-        .map(|detector| start_meeting_persister(detector.clone(), db.clone()));
+    let _meeting_persister_handle = meeting_detector.as_ref().map(|detector| {
+        start_meeting_persister(detector.clone(), db.clone(), manual_meeting.clone())
+    });
 
     // Bridge calendar events from event bus into meeting detector
     let _calendar_bridge_handle = meeting_detector

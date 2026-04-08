@@ -54,6 +54,8 @@ interface TeamState {
   configs: TeamConfig[];
   inviteLink: string | null;
   invitePassphrase: string | null;
+  /** True when user is in a team but encryption key is not on this device */
+  missingKey: boolean;
   loading: boolean;
   error: string | null;
 }
@@ -104,6 +106,7 @@ export function useTeam() {
     configs: [],
     inviteLink: null,
     invitePassphrase: null,
+    missingKey: false,
     loading: true,
     error: null,
   });
@@ -148,11 +151,11 @@ export function useTeam() {
       // load team key from storage
       const key = await loadTeamKeyFromStore(data.team.id);
       teamKeyRef.current = key;
+      const missingKey = !key;
 
       // generate invite link if admin and has key
-      // the invite link NO LONGER contains the raw encryption key
-      // instead: key is wrapped with a passphrase, uploaded to server as a one-time claim
-      // admin shares passphrase separately via secure channel
+      // the invite is now a web URL with the AES key in the URL fragment
+      // (fragment is never sent to the server)
       let inviteLink: string | null = null;
       let invitePassphrase: string | null = null;
       if (data.role === "admin" && key) {
@@ -169,24 +172,11 @@ export function useTeam() {
           if (tokenRes.ok) {
             const tokenData = await tokenRes.json();
 
-            // 2. wrap key with passphrase and upload to server
-            const passphrase = generatePassphrase();
-            const wrapped = await wrapKeyWithPassphrase(key, passphrase);
-
-            const claimRes = await fetch(`${API}/key-claim`, {
-              method: "POST",
-              headers: headers(),
-              body: JSON.stringify({
-                invite_token: tokenData.invite_token,
-                ...wrapped,
-              }),
-            });
-
-            if (claimRes.ok) {
-              const claimData = await claimRes.json();
-              inviteLink = `screenpipe://join-team?team_id=${data.team.id}&invite_token=${tokenData.invite_token}&claim=${claimData.claim_token}`;
-              invitePassphrase = passphrase;
-            }
+            // 2. export key to base64 and build web URL with key in fragment
+            const base64Key = await exportTeamKey(key);
+            inviteLink = `https://screenpi.pe/join/${tokenData.invite_token}#key=${encodeURIComponent(base64Key)}`;
+            // no passphrase needed in new flow
+            invitePassphrase = null;
           }
         } catch {
           // invite generation failed — user can retry
@@ -199,6 +189,7 @@ export function useTeam() {
         role: data.role,
         inviteLink,
         invitePassphrase,
+        missingKey,
         loading: false,
       }));
 
@@ -295,6 +286,7 @@ export function useTeam() {
     async (
       teamId: string,
       opts: {
+        base64Key?: string;
         claimToken?: string;
         passphrase?: string;
         legacyBase64Key?: string;
@@ -305,11 +297,14 @@ export function useTeam() {
 
       let key: CryptoKey;
 
-      if (opts.legacyBase64Key) {
+      if (opts.base64Key) {
+        // direct key flow (new web invite — key in URL fragment)
+        key = await importTeamKey(opts.base64Key);
+      } else if (opts.legacyBase64Key) {
         // legacy flow: raw key in URL (old invite links)
         key = await importTeamKey(opts.legacyBase64Key);
       } else if (opts.claimToken && opts.passphrase) {
-        // new flow: fetch wrapped key from server, unwrap with passphrase
+        // passphrase flow: fetch wrapped key from server, unwrap with passphrase (backwards compat)
         const claimRes = await fetch(
           `${API}/key-claim/${encodeURIComponent(opts.claimToken)}`,
           { headers: headers() }
@@ -379,6 +374,7 @@ export function useTeam() {
       configs: [],
       inviteLink: null,
       invitePassphrase: null,
+      missingKey: false,
       loading: false,
       error: null,
     });
@@ -408,6 +404,7 @@ export function useTeam() {
       configs: [],
       inviteLink: null,
       invitePassphrase: null,
+      missingKey: false,
       loading: false,
       error: null,
     });

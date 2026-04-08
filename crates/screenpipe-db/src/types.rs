@@ -160,6 +160,7 @@ pub struct Speaker {
 }
 
 /// A persistent memory: fact, preference, decision, or insight.
+/// Supports temporal validity (valid_from/valid_to) and entity linking.
 #[derive(OaSchema, Debug, Serialize, Deserialize, FromRow, Clone)]
 pub struct MemoryRecord {
     pub id: i64,
@@ -168,8 +169,15 @@ pub struct MemoryRecord {
     pub source_context: Option<String>,
     pub tags: Option<String>,
     pub importance: f64,
+    pub frame_id: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
+    /// When this fact became true (ISO 8601, optional).
+    pub valid_from: Option<String>,
+    /// When this fact stopped being true (ISO 8601, optional). NULL = still current.
+    pub valid_to: Option<String>,
+    /// Person or project this memory relates to (optional).
+    pub entity: Option<String>,
 }
 
 #[derive(OaSchema, Debug, Serialize, Deserialize, FromRow, Clone)]

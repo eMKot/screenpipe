@@ -27,6 +27,8 @@ import {
   Volume2,
   PanelLeftClose,
   PanelLeftOpen,
+  Phone,
+  Sparkles,
 } from "lucide-react";
 import { useOverlayData } from "@/app/shortcut-reminder/use-overlay-data";
 import { cn } from "@/lib/utils";
@@ -37,11 +39,13 @@ import { RecordingSettings } from "@/components/settings/recording-settings";
 import GeneralSettings from "@/components/settings/general-settings";
 import { ConnectionsSection } from "@/components/settings/connections-section";
 import { FeedbackSection } from "@/components/settings/feedback-section";
-import { PipesSection } from "@/components/settings/pipes-section";
+import { PipeStoreView } from "@/components/pipe-store";
 import { TeamSection } from "@/components/settings/team-section";
 import { DisplaySection } from "@/components/settings/display-section";
 import { PrivacySection } from "@/components/settings/privacy-section";
 import { StorageSection } from "@/components/settings/storage-section";
+import { MeetingsSection } from "@/components/settings/meetings-section";
+import { MemoriesSection } from "@/components/settings/memories-section";
 import { StandaloneChat } from "@/components/standalone-chat";
 import Timeline from "@/components/rewind/timeline";
 import { useQueryState } from "nuqs";
@@ -71,6 +75,8 @@ type SettingsModalSection =
   | "connections"
   | "privacy"
   | "storage"
+  | "meetings"
+  | "memories"
   | "team"
   | "referral";
 
@@ -78,14 +84,14 @@ type SettingsModalSection =
 const ALL_SECTIONS = [
   "home", "timeline", "pipes", "help",
   "account", "recording", "ai", "general", "display", "shortcuts",
-  "connections", "privacy", "storage", "team", "referral",
+  "connections", "privacy", "storage", "meetings", "memories", "team", "referral",
   "feedback", // backwards compat → maps to "help"
   "disk-usage", "cloud-archive", "cloud-sync", // backwards compat → maps to "storage"
 ];
 
 const MODAL_SECTIONS = new Set<string>([
   "account", "recording", "ai", "general", "display", "shortcuts",
-  "connections", "privacy", "storage", "team", "referral",
+  "connections", "privacy", "storage", "meetings", "memories", "team", "referral",
 ]);
 
 function SettingsPageContent() {
@@ -174,6 +180,51 @@ function SettingsPageContent() {
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
+  // Manual meeting toggle state — synced with server
+  const [manualMeeting, setManualMeeting] = useState(false);
+  const [meetingLoading, setMeetingLoading] = useState(false);
+
+  // Poll server for active manual meeting on mount + interval
+  useEffect(() => {
+    let cancelled = false;
+    const check = () => {
+      fetch("http://localhost:3030/meetings?limit=5")
+        .then((r) => r.ok ? r.json() : [])
+        .then((meetings: { meeting_end: string | null; detection_source: string }[]) => {
+          if (cancelled) return;
+          const hasActive = meetings.some(
+            (m) => m.meeting_end === null && m.detection_source === "manual"
+          );
+          setManualMeeting(hasActive);
+        })
+        .catch(() => {});
+    };
+    check();
+    const interval = setInterval(check, 5000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
+  const toggleMeeting = useCallback(async () => {
+    setMeetingLoading(true);
+    try {
+      if (manualMeeting) {
+        await fetch("http://localhost:3030/meetings/stop", { method: "POST" });
+        setManualMeeting(false);
+      } else {
+        await fetch("http://localhost:3030/meetings/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ app: "manual" }),
+        });
+        setManualMeeting(true);
+      }
+    } catch (e) {
+      console.error("meeting toggle failed:", e);
+    } finally {
+      setMeetingLoading(false);
+    }
+  }, [manualMeeting]);
+
   // Watch pipe: navigate to chat when user clicks "watch" on a running pipe
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -216,7 +267,7 @@ function SettingsPageContent() {
       case "timeline":
         return <Timeline embedded />;
       case "pipes":
-        return <PipesSection />;
+        return <PipeStoreView />;
       case "help":
         return <FeedbackSection />;
       default:
@@ -242,6 +293,10 @@ function SettingsPageContent() {
         return <PrivacySection />;
       case "storage":
         return <StorageSection />;
+      case "meetings":
+        return <MeetingsSection />;
+      case "memories":
+        return <MemoriesSection />;
       case "connections":
         return <ConnectionsSection />;
       case "team":
@@ -268,6 +323,8 @@ function SettingsPageContent() {
     { id: "privacy", label: "Privacy", icon: <Shield className="h-4 w-4" />, group: "data" },
     { id: "storage", label: "Storage", icon: <HardDrive className="h-4 w-4" />, group: "data" },
     { id: "connections", label: "Connections", icon: <Plug className="h-4 w-4" />, group: "data" },
+    { id: "meetings", label: "Meetings", icon: <Phone className="h-4 w-4" />, group: "data" },
+    { id: "memories", label: "Memories", icon: <Sparkles className="h-4 w-4" />, group: "data" },
     ...(!isEnterprise ? [{ id: "account" as SettingsModalSection, label: "Account", icon: <User className="h-4 w-4" />, group: "account" }] : []),
     { id: "team", label: "Team", icon: <Users className="h-4 w-4" />, group: "account" },
     ...(!isEnterprise ? [{ id: "referral" as SettingsModalSection, label: "Get free month", icon: <Gift className="h-4 w-4" />, group: "account" }] : []),
@@ -339,6 +396,17 @@ function SettingsPageContent() {
                     </span>
                   ));
                 })()}
+                <button
+                  onClick={toggleMeeting}
+                  disabled={meetingLoading}
+                  className="relative flex items-center justify-center h-5 w-5 text-muted-foreground hover:text-foreground transition-colors"
+                  title={manualMeeting ? "stop meeting" : "start meeting"}
+                >
+                  {manualMeeting && (
+                    <span className="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse" />
+                  )}
+                  <Phone className="h-3.5 w-3.5" />
+                </button>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button

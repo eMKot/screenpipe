@@ -105,7 +105,7 @@ pub async fn request_permission(permission: OSPermission) {
 
 #[cfg(target_os = "macos")]
 fn request_av_permission(media_type: nokhwa_bindings_macos::AVMediaType) {
-    crate::window_api::with_autorelease_pool(|| {
+    crate::window::with_autorelease_pool(|| {
         use objc::{runtime::*, *};
         use tauri_nspanel::block::ConcreteBlock;
 
@@ -208,7 +208,7 @@ pub fn check_microphone_permission() -> OSPermissionStatus {
         use nokhwa_bindings_macos::AVMediaType;
         use objc::*;
 
-        crate::window_api::with_autorelease_pool(|| {
+        crate::window::with_autorelease_pool(|| {
             let cls = objc::class!(AVCaptureDevice);
             let status: AVAuthorizationStatus = unsafe {
                 msg_send![cls, authorizationStatusForMediaType:AVMediaType::Audio.into_ns_str()]
@@ -356,7 +356,7 @@ pub fn do_permissions_check(initial_check: bool) -> OSPermissionsCheck {
         use nokhwa_bindings_macos::AVMediaType;
 
         fn check_av_permission(media_type: AVMediaType) -> OSPermissionStatus {
-            crate::window_api::with_autorelease_pool(|| {
+            crate::window::with_autorelease_pool(|| {
                 use nokhwa_bindings_macos::AVAuthorizationStatus;
                 use objc::*;
 
@@ -396,26 +396,61 @@ pub fn do_permissions_check(initial_check: bool) -> OSPermissionsCheck {
     }
 }
 
-/// Launch Arc if it's not already running, then wait briefly for it to start.
-/// The macOS Automation permission prompt requires the target app to be running.
+/// Known Chromium-based browsers that use AppleScript for incognito detection
+/// and (in Arc's case) URL capture. Each needs its own Automation permission.
 #[cfg(target_os = "macos")]
-fn ensure_arc_running() {
-    use std::process::Command;
-
-    // Check if Arc is already running via pgrep
-    let running = Command::new("pgrep")
-        .args(["-x", "Arc"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if !running {
-        debug!("arc not running, launching it for automation permission prompt");
-        let _ = Command::new("open").args(["-a", "Arc"]).spawn();
-        // Give Arc a moment to launch before the permission API call
-        std::thread::sleep(std::time::Duration::from_secs(2));
-    }
+struct ChromiumBrowserInfo {
+    name: &'static str,
+    bundle_id: &'static str,
+    app_path: &'static str,
+    process_name: &'static str,
 }
+
+#[cfg(target_os = "macos")]
+const CHROMIUM_BROWSERS: &[ChromiumBrowserInfo] = &[
+    ChromiumBrowserInfo {
+        name: "Arc",
+        bundle_id: "company.thebrowser.Browser",
+        app_path: "/Applications/Arc.app",
+        process_name: "Arc",
+    },
+    ChromiumBrowserInfo {
+        name: "Google Chrome",
+        bundle_id: "com.google.Chrome",
+        app_path: "/Applications/Google Chrome.app",
+        process_name: "Google Chrome",
+    },
+    ChromiumBrowserInfo {
+        name: "Brave Browser",
+        bundle_id: "com.brave.Browser",
+        app_path: "/Applications/Brave Browser.app",
+        process_name: "Brave Browser",
+    },
+    ChromiumBrowserInfo {
+        name: "Microsoft Edge",
+        bundle_id: "com.microsoft.edgemac",
+        app_path: "/Applications/Microsoft Edge.app",
+        process_name: "Microsoft Edge",
+    },
+    ChromiumBrowserInfo {
+        name: "Vivaldi",
+        bundle_id: "com.vivaldi.Vivaldi",
+        app_path: "/Applications/Vivaldi.app",
+        process_name: "Vivaldi",
+    },
+    ChromiumBrowserInfo {
+        name: "Opera",
+        bundle_id: "com.operasoftware.Opera",
+        app_path: "/Applications/Opera.app",
+        process_name: "Opera",
+    },
+    ChromiumBrowserInfo {
+        name: "Chromium",
+        bundle_id: "org.chromium.Chromium",
+        app_path: "/Applications/Chromium.app",
+        process_name: "Chromium",
+    },
+];
 
 /// Check if Arc browser is installed (macOS only)
 #[tauri::command(async)]
@@ -424,6 +459,121 @@ pub fn check_arc_installed() -> bool {
     #[cfg(target_os = "macos")]
     {
         std::path::Path::new("/Applications/Arc.app").exists()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// Returns the names of installed Chromium browsers that need Automation permission
+#[tauri::command(async)]
+#[specta::specta]
+pub fn get_installed_browsers() -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    {
+        CHROMIUM_BROWSERS
+            .iter()
+            .filter(|b| std::path::Path::new(b.app_path).exists())
+            .map(|b| b.name.to_string())
+            .collect()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
+/// Check if Automation permission is granted for all installed Chromium browsers.
+/// Returns true only if ALL installed browsers have automation granted.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn check_browsers_automation_permission(_app: tauri::AppHandle) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let installed: Vec<&ChromiumBrowserInfo> = CHROMIUM_BROWSERS
+            .iter()
+            .filter(|b| std::path::Path::new(b.app_path).exists())
+            .collect();
+
+        if installed.is_empty() {
+            return true;
+        }
+
+        if is_app_bundle() {
+            installed
+                .iter()
+                .all(|b| ae_check_automation_direct(b.bundle_id, false) == 0)
+        } else {
+            // Dev mode: just check Arc as before (launchctl approach doesn't scale to N browsers)
+            run_self_detached("--check-arc-automation")
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// Request Automation permission for installed Chromium browsers that are already running.
+/// Never force-launches browsers — only prompts for ones the user already has open.
+/// Opens System Settings > Automation as fallback for browsers not running.
+#[tauri::command(async)]
+#[specta::specta]
+pub fn request_browsers_automation_permission(_app: tauri::AppHandle) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+
+        let installed: Vec<&ChromiumBrowserInfo> = CHROMIUM_BROWSERS
+            .iter()
+            .filter(|b| std::path::Path::new(b.app_path).exists())
+            .collect();
+
+        if installed.is_empty() {
+            return true;
+        }
+
+        if is_app_bundle() {
+            let mut all_granted = true;
+            let mut prompted_any = false;
+
+            for browser in &installed {
+                // Only prompt browsers that are already running — never force-launch (#2510)
+                let running = Command::new("pgrep")
+                    .args(["-x", browser.process_name])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+
+                if running {
+                    let result = ae_check_automation_direct(browser.bundle_id, true);
+                    if result != 0 {
+                        all_granted = false;
+                    }
+                    prompted_any = true;
+                } else {
+                    // Not running — silently check without prompting
+                    let result = ae_check_automation_direct(browser.bundle_id, false);
+                    if result != 0 {
+                        all_granted = false;
+                    }
+                }
+            }
+
+            // Only open System Settings if we couldn't prompt any running browser
+            if !all_granted && !prompted_any {
+                open_permission_settings(OSPermission::Automation);
+            }
+            all_granted
+        } else {
+            open_permission_settings(OSPermission::Automation);
+            run_self_detached_fire_and_forget("--trigger-arc-automation");
+            false
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -635,18 +785,32 @@ fn run_self_detached_fire_and_forget(flag: &str) {
 pub fn request_arc_automation_permission(_app: tauri::AppHandle) -> bool {
     #[cfg(target_os = "macos")]
     {
-        // Arc must be running for macOS to show the permission prompt
-        ensure_arc_running();
+        use std::process::Command;
+
+        // Only prompt if Arc is already running — never force-launch (#2510)
+        let arc_running = Command::new("pgrep")
+            .args(["-x", "Arc"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
 
         if is_app_bundle() {
-            let result = ae_check_automation_direct("company.thebrowser.Browser", true);
-            if result != 0 {
+            if arc_running {
+                let result = ae_check_automation_direct("company.thebrowser.Browser", true);
+                if result != 0 {
+                    open_permission_settings(OSPermission::Automation);
+                }
+                result == 0
+            } else {
+                // Arc not running — open System Settings instead of force-launching
                 open_permission_settings(OSPermission::Automation);
+                false
             }
-            result == 0
         } else {
             open_permission_settings(OSPermission::Automation);
-            run_self_detached_fire_and_forget("--trigger-arc-automation");
+            if arc_running {
+                run_self_detached_fire_and_forget("--trigger-arc-automation");
+            }
             false
         }
     }
@@ -678,8 +842,10 @@ pub async fn start_permission_monitor(app: tauri::AppHandle) {
     // Extra delay after onboarding to let permissions settle
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    // Check if Arc is installed once at startup
-    let arc_installed = std::path::Path::new("/Applications/Arc.app").exists();
+    // Check if any Chromium browser is installed once at startup
+    let any_browser_installed = CHROMIUM_BROWSERS
+        .iter()
+        .any(|b| std::path::Path::new(b.app_path).exists());
 
     let mut check_interval = interval(Duration::from_secs(10));
 
@@ -690,13 +856,13 @@ pub async fn start_permission_monitor(app: tauri::AppHandle) {
     let mut screen_fail_count = 0u32;
     let mut mic_fail_count = 0u32;
     let mut accessibility_fail_count = 0u32;
-    let mut arc_fail_count = 0u32;
+    let mut browser_fail_count = 0u32;
     // Require consecutive successes before resetting fail count, to prevent
     // a single transient "OK" from resetting the counter and re-triggering
     let mut screen_ok_count = 0u32;
     let mut mic_ok_count = 0u32;
     let mut accessibility_ok_count = 0u32;
-    let mut arc_ok_count = 0u32;
+    let mut browser_ok_count = 0u32;
     const REQUIRED_CONSECUTIVE_FAILURES: u32 = 2;
     const REQUIRED_CONSECUTIVE_SUCCESSES: u32 = 3; // need 3 consecutive OKs (~30s) to reset
 
@@ -716,9 +882,10 @@ pub async fn start_permission_monitor(app: tauri::AppHandle) {
         let mic_ok = perms.microphone.permitted();
         let accessibility_ok = perms.accessibility.permitted();
 
-        // Check Arc automation permission if Arc is installed
-        let arc_ok = if arc_installed {
-            check_arc_automation_permission(app.clone())
+        // Check browser automation permission if any Chromium browser is installed
+        // This is informational only — never triggers recovery modal (#2510)
+        let browser_automation_ok = if any_browser_installed {
+            check_browsers_automation_permission(app.clone())
         } else {
             true
         };
@@ -756,14 +923,14 @@ pub async fn start_permission_monitor(app: tauri::AppHandle) {
             accessibility_fail_count = accessibility_fail_count.saturating_add(1);
         }
 
-        if arc_ok {
-            arc_ok_count += 1;
-            if arc_ok_count >= REQUIRED_CONSECUTIVE_SUCCESSES {
-                arc_fail_count = 0;
+        if browser_automation_ok {
+            browser_ok_count += 1;
+            if browser_ok_count >= REQUIRED_CONSECUTIVE_SUCCESSES {
+                browser_fail_count = 0;
             }
         } else {
-            arc_ok_count = 0;
-            arc_fail_count = arc_fail_count.saturating_add(1);
+            browser_ok_count = 0;
+            browser_fail_count = browser_fail_count.saturating_add(1);
         }
 
         // Only trigger when we have REQUIRED_CONSECUTIVE_FAILURES in a row
@@ -771,10 +938,9 @@ pub async fn start_permission_monitor(app: tauri::AppHandle) {
         let mic_confirmed_lost = mic_fail_count == REQUIRED_CONSECUTIVE_FAILURES;
         let accessibility_confirmed_lost =
             accessibility_fail_count == REQUIRED_CONSECUTIVE_FAILURES;
-        // Arc automation is tracked but NOT used to trigger the recovery modal —
-        // it's optional and shouldn't block the user. The arc_automation field is
-        // still included in the payload for the banner/recovery page to display.
-        let _ = arc_fail_count; // keep tracking for payload, suppress unused warning
+        // Browser automation is tracked but NOT used to trigger the recovery modal —
+        // it's optional and shouldn't block the user (#2510).
+        let _ = browser_fail_count; // keep tracking for payload, suppress unused warning
 
         // Only emit permission-lost when a CORE permission is lost (screen, mic, accessibility).
         let core_lost = screen_confirmed_lost || mic_confirmed_lost || accessibility_confirmed_lost;
@@ -791,7 +957,7 @@ pub async fn start_permission_monitor(app: tauri::AppHandle) {
                         "screen_recording": !screen_ok,
                         "microphone": !mic_ok,
                         "accessibility": !accessibility_ok,
-                        "arc_automation": !arc_ok,
+                        "browser_automation": !browser_automation_ok,
                     }),
                 ) {
                     error!("failed to emit permission-lost event: {}", e);

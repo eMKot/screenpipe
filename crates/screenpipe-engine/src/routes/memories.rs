@@ -25,6 +25,13 @@ pub(crate) struct CreateMemoryRequest {
     pub tags: Vec<String>,
     #[serde(default = "default_importance")]
     pub importance: f64,
+    pub frame_id: Option<i64>,
+    /// When this fact became true (ISO 8601, optional).
+    pub valid_from: Option<String>,
+    /// When this fact stopped being true (ISO 8601, optional).
+    pub valid_to: Option<String>,
+    /// Person or project this memory relates to (optional).
+    pub entity: Option<String>,
 }
 
 fn default_source() -> String {
@@ -43,8 +50,15 @@ pub(crate) struct MemoryResponse {
     pub source_context: Option<Value>,
     pub tags: Vec<String>,
     pub importance: f64,
+    pub frame_id: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entity: Option<String>,
 }
 
 #[derive(OaSchema, Serialize)]
@@ -65,6 +79,11 @@ pub(crate) struct ListMemoriesQuery {
     pub limit: u32,
     #[serde(default)]
     pub offset: u32,
+    /// Filter by entity (person or project name).
+    pub entity: Option<String>,
+    /// Only return memories where valid_to IS NULL (currently true facts).
+    #[serde(default)]
+    pub current_only: bool,
 }
 
 fn default_limit() -> u32 {
@@ -77,6 +96,9 @@ pub(crate) struct UpdateMemoryRequest {
     pub tags: Option<Vec<String>>,
     pub importance: Option<f64>,
     pub source_context: Option<Value>,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
+    pub entity: Option<String>,
 }
 
 fn memory_to_response(m: screenpipe_db::MemoryRecord) -> MemoryResponse {
@@ -94,8 +116,12 @@ fn memory_to_response(m: screenpipe_db::MemoryRecord) -> MemoryResponse {
             .and_then(|t| serde_json::from_str(t).ok())
             .unwrap_or_default(),
         importance: m.importance,
+        frame_id: m.frame_id,
         created_at: m.created_at,
         updated_at: m.updated_at,
+        valid_from: m.valid_from,
+        valid_to: m.valid_to,
+        entity: m.entity,
     }
 }
 
@@ -109,12 +135,16 @@ pub(crate) async fn create_memory_handler(
 
     let id = state
         .db
-        .insert_memory(
+        .insert_memory_with_temporal(
             &payload.content,
             &payload.source,
             source_context_json.as_deref(),
             Some(&tags_json),
             payload.importance,
+            payload.frame_id,
+            payload.valid_from.as_deref(),
+            payload.valid_to.as_deref(),
+            payload.entity.as_deref(),
         )
         .await
         .map_err(|e| {
@@ -141,7 +171,7 @@ pub(crate) async fn list_memories_handler(
 ) -> Result<JsonResponse<MemoryListResponse>, (StatusCode, JsonResponse<Value>)> {
     let memories = state
         .db
-        .list_memories(
+        .list_memories_with_temporal(
             query.q.as_deref(),
             query.source.as_deref(),
             query.tags.as_deref(),
@@ -150,6 +180,8 @@ pub(crate) async fn list_memories_handler(
             query.end_time.as_deref(),
             query.limit,
             query.offset,
+            query.entity.as_deref(),
+            query.current_only,
         )
         .await
         .map_err(|e| {
@@ -215,12 +247,15 @@ pub(crate) async fn update_memory_handler(
 
     state
         .db
-        .update_memory(
+        .update_memory_with_temporal(
             id,
             payload.content.as_deref(),
             tags_json.as_deref(),
             payload.importance,
             source_context_json.as_deref(),
+            payload.valid_to.as_deref(),
+            payload.entity.as_deref(),
+            payload.valid_from.as_deref(),
         )
         .await
         .map_err(|e| {
@@ -245,16 +280,12 @@ pub(crate) async fn delete_memory_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> Result<JsonResponse<Value>, (StatusCode, JsonResponse<Value>)> {
-    state
-        .db
-        .delete_memory(id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                JsonResponse(json!({"error": e.to_string()})),
-            )
-        })?;
+    state.db.delete_memory(id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            JsonResponse(json!({"error": e.to_string()})),
+        )
+    })?;
 
     Ok(JsonResponse(json!({"ok": true})))
 }
