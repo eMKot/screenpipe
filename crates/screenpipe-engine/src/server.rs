@@ -17,6 +17,7 @@ use crate::{
     hot_frame_cache::HotFrameCache,
     routes::{
         activity_summary::get_activity_summary,
+        context::{get_context, list_sessions},
         audio::{
             api_list_audio_devices, start_audio, start_audio_device, stop_audio, stop_audio_device,
         },
@@ -505,6 +506,8 @@ impl SCServer {
             .get("/elements", search_elements)
             .get("/frames/:frame_id/elements", get_frame_elements)
             .get("/activity-summary", get_activity_summary)
+            .get("/context", get_context)
+            .get("/sessions", list_sessions)
             .route_yaml_spec("/openapi.yaml")
             .route_json_spec("/openapi.json")
             .freeze();

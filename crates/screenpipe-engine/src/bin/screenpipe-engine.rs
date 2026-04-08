@@ -615,6 +615,12 @@ async fn main() -> anyhow::Result<()> {
         Some(hot_frame_cache.clone()),
     );
 
+    // Start background activity session detection (topic clustering)
+    screenpipe_engine::start_activity_sessions(
+        db.clone(),
+        shutdown_tx.subscribe(),
+    );
+
     // Create VisionManager for event-driven capture on all monitors
     let (handle, capture_trigger_tx) = if !config.disable_vision {
         let vision_config =

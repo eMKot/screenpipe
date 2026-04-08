@@ -5864,10 +5864,25 @@ LIMIT ? OFFSET ?
         importance: f64,
         frame_id: Option<i64>,
     ) -> Result<i64, SqlxError> {
+        self.insert_memory_with_temporal(content, source, source_context, tags, importance, frame_id, None, None, None).await
+    }
+
+    pub async fn insert_memory_with_temporal(
+        &self,
+        content: &str,
+        source: &str,
+        source_context: Option<&str>,
+        tags: Option<&str>,
+        importance: f64,
+        frame_id: Option<i64>,
+        valid_from: Option<&str>,
+        valid_to: Option<&str>,
+        entity: Option<&str>,
+    ) -> Result<i64, SqlxError> {
         let mut tx = self.begin_immediate_with_retry().await?;
         let id = sqlx::query(
-            "INSERT INTO memories (content, source, source_context, tags, importance, frame_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO memories (content, source, source_context, tags, importance, frame_id, valid_from, valid_to, entity) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )
         .bind(content)
         .bind(source)
@@ -5875,6 +5890,9 @@ LIMIT ? OFFSET ?
         .bind(tags.unwrap_or("[]"))
         .bind(importance)
         .bind(frame_id)
+        .bind(valid_from)
+        .bind(valid_to)
+        .bind(entity)
         .execute(&mut **tx.conn())
         .await?
         .last_insert_rowid();
@@ -5885,7 +5903,7 @@ LIMIT ? OFFSET ?
     pub async fn get_memory_by_id(&self, id: i64) -> Result<MemoryRecord, SqlxError> {
         sqlx::query_as::<_, MemoryRecord>(
             "SELECT id, content, source, source_context, tags, importance, frame_id, \
-             created_at, updated_at \
+             created_at, updated_at, valid_from, valid_to, entity \
              FROM memories WHERE id = ?1",
         )
         .bind(id)
@@ -5900,6 +5918,20 @@ LIMIT ? OFFSET ?
         tags: Option<&str>,
         importance: Option<f64>,
         source_context: Option<&str>,
+    ) -> Result<(), SqlxError> {
+        self.update_memory_with_temporal(id, content, tags, importance, source_context, None, None, None).await
+    }
+
+    pub async fn update_memory_with_temporal(
+        &self,
+        id: i64,
+        content: Option<&str>,
+        tags: Option<&str>,
+        importance: Option<f64>,
+        source_context: Option<&str>,
+        valid_to: Option<&str>,
+        entity: Option<&str>,
+        valid_from: Option<&str>,
     ) -> Result<(), SqlxError> {
         let mut tx = self.begin_immediate_with_retry().await?;
         let now = chrono::Utc::now()
@@ -5919,6 +5951,15 @@ LIMIT ? OFFSET ?
         if source_context.is_some() {
             sets.push("source_context = ?5");
         }
+        if valid_to.is_some() {
+            sets.push("valid_to = ?7");
+        }
+        if entity.is_some() {
+            sets.push("entity = ?8");
+        }
+        if valid_from.is_some() {
+            sets.push("valid_from = ?9");
+        }
 
         let sql = format!(
             "UPDATE memories SET {} WHERE id = ?6",
@@ -5932,6 +5973,9 @@ LIMIT ? OFFSET ?
             .bind(importance)
             .bind(source_context)
             .bind(id)
+            .bind(valid_to)
+            .bind(entity)
+            .bind(valid_from)
             .execute(&mut **tx.conn())
             .await?;
         tx.commit().await?;
@@ -5959,12 +6003,32 @@ LIMIT ? OFFSET ?
         limit: u32,
         offset: u32,
     ) -> Result<Vec<MemoryRecord>, SqlxError> {
+        self.list_memories_with_temporal(
+            query, source, tags_filter, min_importance,
+            start_time, end_time, limit, offset,
+            None, false,
+        ).await
+    }
+
+    pub async fn list_memories_with_temporal(
+        &self,
+        query: Option<&str>,
+        source: Option<&str>,
+        tags_filter: Option<&str>,
+        min_importance: Option<f64>,
+        start_time: Option<&str>,
+        end_time: Option<&str>,
+        limit: u32,
+        offset: u32,
+        entity: Option<&str>,
+        current_only: bool,
+    ) -> Result<Vec<MemoryRecord>, SqlxError> {
         let use_fts = query.is_some_and(|q| !q.is_empty());
 
         let mut sql = if use_fts {
             String::from(
                 "SELECT m.id, m.content, m.source, m.source_context, m.tags, m.importance, m.frame_id, \
-                 m.created_at, m.updated_at \
+                 m.created_at, m.updated_at, m.valid_from, m.valid_to, m.entity \
                  FROM memories_fts fts \
                  JOIN memories m ON m.id = fts.rowid \
                  WHERE 1=1",
@@ -5972,7 +6036,7 @@ LIMIT ? OFFSET ?
         } else {
             String::from(
                 "SELECT id, content, source, source_context, tags, importance, frame_id, \
-                 created_at, updated_at \
+                 created_at, updated_at, valid_from, valid_to, entity \
                  FROM memories WHERE 1=1",
             )
         };
@@ -5995,6 +6059,14 @@ LIMIT ? OFFSET ?
         if end_time.is_some() {
             sql.push_str(" AND created_at <= ?6");
         }
+        if entity.is_some() {
+            let prefix = if use_fts { "m." } else { "" };
+            sql.push_str(&format!(" AND {}entity = ?9", prefix));
+        }
+        if current_only {
+            let prefix = if use_fts { "m." } else { "" };
+            sql.push_str(&format!(" AND {}valid_to IS NULL", prefix));
+        }
 
         sql.push_str(" ORDER BY importance DESC, created_at DESC LIMIT ?7 OFFSET ?8");
 
@@ -6009,6 +6081,7 @@ LIMIT ? OFFSET ?
             .bind(end_time)
             .bind(limit)
             .bind(offset)
+            .bind(entity)
             .fetch_all(&self.pool)
             .await
     }

@@ -90,6 +90,14 @@ const TOOLS: Tool[] = [
           type: "integer",
           description: "Truncate each result via middle-truncation",
         },
+        topic: {
+          type: "string",
+          description: "Filter by activity session topic (e.g. 'orion-auth'). Pre-filters by session time range and apps.",
+        },
+        session_id: {
+          type: "integer",
+          description: "Filter by activity session ID. Pre-filters by session time range and apps.",
+        },
       },
     },
   },
@@ -190,6 +198,35 @@ const TOOLS: Tool[] = [
         importance: { type: "number", description: "0.0-1.0 (default 0.5)" },
         source_context: { type: "object", description: "Optional source data links" },
         delete: { type: "boolean", description: "Delete the memory identified by id" },
+        entity: { type: "string", description: "Person or project this memory relates to" },
+        valid_from: { type: "string", description: "When this fact became true (ISO 8601)" },
+        valid_to: { type: "string", description: "When this fact stopped being true (ISO 8601)" },
+        invalidate: { type: "boolean", description: "Set valid_to to now (marks memory as expired)" },
+      },
+    },
+  },
+  {
+    name: "get-context",
+    description:
+      "Get current context: active apps, speakers, meetings, recent memories, compact timeline (~200 tokens). " +
+      "Call this first in every session to understand what the user is doing.",
+    annotations: { title: "Get Context", readOnlyHint: true },
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "list-sessions",
+    description:
+      "List activity sessions (topic clusters). Each session groups captures by topic across apps. " +
+      "Use to find which topics to search within via search-content's topic parameter.",
+    annotations: { title: "List Sessions", readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        start_time: { type: "string", description: "ISO 8601 UTC or relative (default: 24h ago)" },
+        end_time: { type: "string", description: "ISO 8601 UTC or relative (default: now)" },
+        topic: { type: "string", description: "Filter sessions by topic keyword" },
+        limit: { type: "integer", description: "Max results (default 20)", default: 20 },
+        offset: { type: "integer", description: "Pagination offset", default: 0 },
       },
     },
   },
@@ -738,6 +775,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           importance: args.importance ?? 0.5,
         };
         if (args.source_context) memoryBody.source_context = args.source_context;
+        if (args.entity) memoryBody.entity = args.entity;
+        if (args.valid_from) memoryBody.valid_from = args.valid_from;
+        if (args.valid_to) memoryBody.valid_to = args.valid_to;
         const memoryResponse = await fetchAPI("/memories", {
           method: "POST",
           body: JSON.stringify(memoryBody),
@@ -748,6 +788,82 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             { type: "text", text: `Memory created (id: ${newMemory.id}): "${newMemory.content}"` },
           ],
+        };
+      }
+
+      case "get-context": {
+        const response = await fetchAPI("/context");
+        if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
+        const ctx = await response.json();
+
+        const lines = [];
+        lines.push(`Device: ${ctx.device?.name || "?"} (recording since ${ctx.device?.recording_since || "?"})`);
+
+        if (ctx.active_apps?.length) {
+          lines.push("", "Active apps (last 2h):");
+          for (const app of ctx.active_apps) {
+            lines.push(`  ${app.name}: ${app.minutes} min — ${app.window || ""}`);
+          }
+        }
+
+        if (ctx.recent_speakers?.length) {
+          lines.push("", `Speakers: ${ctx.recent_speakers.join(", ")}`);
+        }
+
+        if (ctx.active_meeting) {
+          lines.push("", `Meeting: ${ctx.active_meeting.app} — ${ctx.active_meeting.title || "untitled"} (since ${ctx.active_meeting.started_at})`);
+        }
+
+        if (ctx.key_memories?.length) {
+          lines.push("", "Key memories:");
+          for (const m of ctx.key_memories) {
+            lines.push(`  [${m.importance}] ${m.content}`);
+          }
+        }
+
+        if (ctx.compact_timeline?.length) {
+          lines.push("", "Recent timeline:");
+          for (const line of ctx.compact_timeline) {
+            lines.push(`  ${line}`);
+          }
+        }
+
+        if (ctx.recent_sessions?.length) {
+          lines.push("", "Recent sessions:");
+          for (const s of ctx.recent_sessions) {
+            lines.push(`  ${s.topic} (${s.start_time} — ${s.end_time || "ongoing"}) [${s.apps?.join(", ")}]`);
+          }
+        }
+
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      case "list-sessions": {
+        const params = new URLSearchParams();
+        for (const [key, value] of Object.entries(args)) {
+          if (value !== null && value !== undefined) {
+            params.append(key, String(value));
+          }
+        }
+
+        const response = await fetchAPI(`/sessions?${params.toString()}`);
+        if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
+        const data = await response.json();
+        const sessions = data.data || [];
+
+        if (sessions.length === 0) {
+          return { content: [{ type: "text", text: "No activity sessions found for the given time range." }] };
+        }
+
+        const formatted = sessions.map((s: { id: number; topic: string; start_time: string; end_time?: string; apps: string[]; frame_count: number; compact_log: string }) => {
+          const header = `[${s.topic}] ${s.start_time} — ${s.end_time || "ongoing"} (${s.frame_count} frames)`;
+          const apps = s.apps?.length ? `  Apps: ${s.apps.join(", ")}` : "";
+          const log = s.compact_log ? `  ${s.compact_log.split("\n").slice(0, 5).join("\n  ")}` : "";
+          return [header, apps, log].filter(Boolean).join("\n");
+        });
+
+        return {
+          content: [{ type: "text", text: `Sessions: ${sessions.length}/${data.total || "?"}\n\n${formatted.join("\n---\n")}` }],
         };
       }
 
