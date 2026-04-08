@@ -135,72 +135,75 @@ pub async fn get_context(
         .to_string();
     let now_str = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
+    // Pre-build all SQL strings so they outlive the tokio::join! block
+    let apps_sql = format!(
+        "SELECT app_name, \
+         ROUND(SUM(CASE WHEN gap_sec < 300 THEN gap_sec ELSE 0 END) / 60.0, 1) as minutes, \
+         MAX(window_name) as last_window \
+         FROM ( \
+           SELECT app_name, window_name, \
+             (JULIANDAY(LEAD(timestamp) OVER (PARTITION BY app_name ORDER BY timestamp)) \
+              - JULIANDAY(timestamp)) * 86400 AS gap_sec \
+           FROM frames \
+           WHERE timestamp BETWEEN '{}' AND '{}' \
+           AND app_name IS NOT NULL AND app_name != '' \
+         ) gaps \
+         GROUP BY app_name ORDER BY minutes DESC LIMIT 5",
+        two_hours_ago, now_str
+    );
+    let speakers_sql = format!(
+        "SELECT DISTINCT COALESCE(s.name, 'Unknown') as speaker_name \
+         FROM audio_transcriptions at \
+         LEFT JOIN speakers s ON at.speaker_id = s.id \
+         WHERE at.timestamp BETWEEN '{}' AND '{}' \
+         AND s.name IS NOT NULL AND s.name != 'Unknown' \
+         ORDER BY at.timestamp DESC LIMIT 5",
+        two_hours_ago, now_str
+    );
+    let timeline_sql = format!(
+        "SELECT \
+           strftime('%H:%M', timestamp) as time, \
+           LOWER(REPLACE(REPLACE(app_name, '.app', ''), ' ', '')) as app_slug, \
+           SUBSTR(window_name, 1, 50) as win \
+         FROM ( \
+           SELECT timestamp, app_name, window_name, \
+             LAG(app_name || '|' || window_name) OVER (ORDER BY timestamp) as prev \
+           FROM frames \
+           WHERE timestamp BETWEEN '{}' AND '{}' \
+           AND app_name IS NOT NULL AND app_name != '' \
+         ) \
+         WHERE prev IS NULL OR (app_name || '|' || window_name) != prev \
+         ORDER BY timestamp DESC LIMIT 15",
+        one_hour_ago, now_str
+    );
+    let four_hours_ago = (now - Duration::hours(4))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let sessions_sql = format!(
+        "SELECT topic, start_time, end_time, apps, frame_count \
+         FROM activity_sessions \
+         WHERE start_time >= '{}' \
+         ORDER BY start_time DESC LIMIT 3",
+        four_hours_ago
+    );
+
     // Run all queries in parallel
     let (apps_result, speakers_result, meeting_result, memories_result, timeline_result, sessions_result) =
         tokio::join!(
-            // Active apps (last 2 hours, top 5)
-            state.db.execute_raw_sql(&format!(
-                "SELECT app_name, \
-                 ROUND(SUM(CASE WHEN gap_sec < 300 THEN gap_sec ELSE 0 END) / 60.0, 1) as minutes, \
-                 MAX(window_name) as last_window \
-                 FROM ( \
-                   SELECT app_name, window_name, \
-                     (JULIANDAY(LEAD(timestamp) OVER (PARTITION BY app_name ORDER BY timestamp)) \
-                      - JULIANDAY(timestamp)) * 86400 AS gap_sec \
-                   FROM frames \
-                   WHERE timestamp BETWEEN '{}' AND '{}' \
-                   AND app_name IS NOT NULL AND app_name != '' \
-                 ) gaps \
-                 GROUP BY app_name ORDER BY minutes DESC LIMIT 5",
-                two_hours_ago, now_str
-            )),
-            // Recent speakers (last 2 hours)
-            state.db.execute_raw_sql(&format!(
-                "SELECT DISTINCT COALESCE(s.name, 'Unknown') as speaker_name \
-                 FROM audio_transcriptions at \
-                 LEFT JOIN speakers s ON at.speaker_id = s.id \
-                 WHERE at.timestamp BETWEEN '{}' AND '{}' \
-                 AND s.name IS NOT NULL AND s.name != 'Unknown' \
-                 ORDER BY at.timestamp DESC LIMIT 5",
-                two_hours_ago, now_str
-            )),
-            // Active meeting (ongoing)
+            state.db.execute_raw_sql(&apps_sql),
+            state.db.execute_raw_sql(&speakers_sql),
             state.db.execute_raw_sql(
                 "SELECT meeting_app, title, meeting_start \
                  FROM meetings \
                  WHERE meeting_end IS NULL \
                  ORDER BY meeting_start DESC LIMIT 1"
             ),
-            // Key memories (top 3 by importance)
             state.db.execute_raw_sql(
                 "SELECT content, importance FROM memories \
                  ORDER BY importance DESC, created_at DESC LIMIT 3"
             ),
-            // Compact timeline (last hour, distinct app+window transitions)
-            state.db.execute_raw_sql(&format!(
-                "SELECT \
-                   strftime('%H:%M', timestamp) as time, \
-                   LOWER(REPLACE(REPLACE(app_name, '.app', ''), ' ', '')) as app_slug, \
-                   SUBSTR(window_name, 1, 50) as win \
-                 FROM ( \
-                   SELECT timestamp, app_name, window_name, \
-                     LAG(app_name || '|' || window_name) OVER (ORDER BY timestamp) as prev \
-                   FROM frames \
-                   WHERE timestamp BETWEEN '{}' AND '{}' \
-                   AND app_name IS NOT NULL AND app_name != '' \
-                 ) \
-                 WHERE prev IS NULL OR (app_name || '|' || window_name) != prev \
-                 ORDER BY timestamp DESC LIMIT 15",
-                one_hour_ago, now_str
-            )),
-            // Recent activity sessions (last 4 hours, top 3)
-            state.db.execute_raw_sql(&format!(
-                "SELECT topic, start_time, end_time, apps, frame_count \
-                 FROM activity_sessions \
-                 WHERE start_time >= '{}' \
-                 ORDER BY start_time DESC LIMIT 3",
-                (now - Duration::hours(4)).format("%Y-%m-%dT%H:%M:%SZ").to_string()
-            )),
+            state.db.execute_raw_sql(&timeline_sql),
+            state.db.execute_raw_sql(&sessions_sql),
         );
 
     // Parse active apps
