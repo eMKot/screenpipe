@@ -99,9 +99,15 @@ pub struct SessionsListResponse {
 
 #[derive(Deserialize, OaSchema)]
 pub struct SessionsQuery {
-    #[serde(default, deserialize_with = "super::time::deserialize_flexible_datetime_option")]
+    #[serde(
+        default,
+        deserialize_with = "super::time::deserialize_flexible_datetime_option"
+    )]
     pub start_time: Option<chrono::DateTime<Utc>>,
-    #[serde(default, deserialize_with = "super::time::deserialize_flexible_datetime_option")]
+    #[serde(
+        default,
+        deserialize_with = "super::time::deserialize_flexible_datetime_option"
+    )]
     pub end_time: Option<chrono::DateTime<Utc>>,
     #[serde(default)]
     pub topic: Option<String>,
@@ -188,23 +194,29 @@ pub async fn get_context(
     );
 
     // Run all queries in parallel
-    let (apps_result, speakers_result, meeting_result, memories_result, timeline_result, sessions_result) =
-        tokio::join!(
-            state.db.execute_raw_sql(&apps_sql),
-            state.db.execute_raw_sql(&speakers_sql),
-            state.db.execute_raw_sql(
-                "SELECT meeting_app, title, meeting_start \
+    let (
+        apps_result,
+        speakers_result,
+        meeting_result,
+        memories_result,
+        timeline_result,
+        sessions_result,
+    ) = tokio::join!(
+        state.db.execute_raw_sql(&apps_sql),
+        state.db.execute_raw_sql(&speakers_sql),
+        state.db.execute_raw_sql(
+            "SELECT meeting_app, title, meeting_start \
                  FROM meetings \
                  WHERE meeting_end IS NULL \
                  ORDER BY meeting_start DESC LIMIT 1"
-            ),
-            state.db.execute_raw_sql(
-                "SELECT content, importance FROM memories \
+        ),
+        state.db.execute_raw_sql(
+            "SELECT content, importance FROM memories \
                  ORDER BY importance DESC, created_at DESC LIMIT 3"
-            ),
-            state.db.execute_raw_sql(&timeline_sql),
-            state.db.execute_raw_sql(&sessions_sql),
-        );
+        ),
+        state.db.execute_raw_sql(&timeline_sql),
+        state.db.execute_raw_sql(&sessions_sql),
+    );
 
     // Parse active apps
     let mut active_apps = Vec::new();
@@ -218,7 +230,10 @@ pub async fn get_context(
                     .to_string();
                 let minutes = row
                     .get("minutes")
-                    .and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                    .and_then(|v| {
+                        v.as_f64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    })
                     .unwrap_or(0.0);
                 let window = row
                     .get("last_window")
@@ -292,7 +307,10 @@ pub async fn get_context(
                     .to_string();
                 let importance = row
                     .get("importance")
-                    .and_then(|v| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                    .and_then(|v| {
+                        v.as_f64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    })
                     .unwrap_or(0.5);
                 key_memories.push(KeyMemory {
                     content,
@@ -342,15 +360,9 @@ pub async fn get_context(
                     .get("end_time")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                let apps_str = row
-                    .get("apps")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("[]");
+                let apps_str = row.get("apps").and_then(|v| v.as_str()).unwrap_or("[]");
                 let apps: Vec<String> = serde_json::from_str(apps_str).unwrap_or_default();
-                let frame_count = row
-                    .get("frame_count")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
+                let frame_count = row.get("frame_count").and_then(|v| v.as_i64()).unwrap_or(0);
                 recent_sessions.push(RecentSession {
                     topic,
                     start_time,
@@ -367,7 +379,10 @@ pub async fn get_context(
         name: hostname::get()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".to_string()),
-        recording_since: state.app_start_time.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        recording_since: state
+            .app_start_time
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string(),
     };
 
     Ok(JsonResponse(ContextResponse {
@@ -410,10 +425,7 @@ pub async fn list_sessions(
     )];
 
     if let Some(ref topic) = query.topic {
-        where_clauses.push(format!(
-            "topic LIKE '%{}%'",
-            topic.replace('\'', "''")
-        ));
+        where_clauses.push(format!("topic LIKE '%{}%'", topic.replace('\'', "''")));
     }
 
     let where_sql = where_clauses.join(" AND ");
@@ -445,12 +457,8 @@ pub async fn list_sessions(
     if let Ok(rows) = data_result {
         if let Some(arr) = rows.as_array() {
             for row in arr {
-                let apps_str = row
-                    .get("apps")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("[]");
-                let apps: Vec<String> =
-                    serde_json::from_str(apps_str).unwrap_or_default();
+                let apps_str = row.get("apps").and_then(|v| v.as_str()).unwrap_or("[]");
+                let apps: Vec<String> = serde_json::from_str(apps_str).unwrap_or_default();
                 sessions.push(SessionSummary {
                     id: row.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
                     topic: row
@@ -468,10 +476,7 @@ pub async fn list_sessions(
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
                     apps,
-                    frame_count: row
-                        .get("frame_count")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0),
+                    frame_count: row.get("frame_count").and_then(|v| v.as_i64()).unwrap_or(0),
                     compact_log: row
                         .get("compact_log")
                         .and_then(|v| v.as_str())

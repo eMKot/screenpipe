@@ -17,7 +17,6 @@ use crate::{
     hot_frame_cache::HotFrameCache,
     routes::{
         activity_summary::get_activity_summary,
-        context::{get_context, list_sessions},
         audio::{
             api_list_audio_devices, start_audio, start_audio_device, stop_audio, stop_audio_device,
         },
@@ -25,6 +24,7 @@ use crate::{
             add_tags, add_to_database, execute_raw_sql, get_tags_batch, merge_frames_handler,
             remove_tags, validate_media_handler,
         },
+        context::{get_context, list_sessions},
         data::{delete_device_data_handler, delete_time_range_handler, device_storage_handler},
         elements::{get_frame_elements, search_elements},
         frames::{

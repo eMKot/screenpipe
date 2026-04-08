@@ -36,12 +36,12 @@ const MERGE_WINDOW_MINUTES: i64 = 30;
 const MAX_COMPACT_LOG_LINES: usize = 20;
 
 /// Start the background activity sessions worker.
-pub fn start_activity_sessions(
-    db: Arc<DatabaseManager>,
-    mut shutdown_rx: broadcast::Receiver<()>,
-) {
+pub fn start_activity_sessions(db: Arc<DatabaseManager>, mut shutdown_rx: broadcast::Receiver<()>) {
     tokio::spawn(async move {
-        info!("activity sessions worker started (poll={}s, lookback={}min)", POLL_INTERVAL_SECS, LOOKBACK_MINUTES);
+        info!(
+            "activity sessions worker started (poll={}s, lookback={}min)",
+            POLL_INTERVAL_SECS, LOOKBACK_MINUTES
+        );
 
         // Initial delay to let the app finish starting up
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -162,11 +162,16 @@ fn build_segments(frames: &[FrameRecord]) -> Vec<Segment> {
 
     for frame in frames {
         let should_start_new = segments.last().map_or(true, |seg| {
-            seg.app_name != frame.app_name || time_gap_secs(&seg.end_time, &frame.timestamp) > GAP_THRESHOLD_SECS
+            seg.app_name != frame.app_name
+                || time_gap_secs(&seg.end_time, &frame.timestamp) > GAP_THRESHOLD_SECS
         });
 
         if should_start_new {
-            let topic = extract_topic(&frame.app_name, &frame.window_name, frame.browser_url.as_deref());
+            let topic = extract_topic(
+                &frame.app_name,
+                &frame.window_name,
+                frame.browser_url.as_deref(),
+            );
             segments.push(Segment {
                 app_name: frame.app_name.clone(),
                 windows: vec![frame.window_name.clone()],
@@ -281,7 +286,13 @@ fn extract_context_from_url(url: &str) -> Option<String> {
 
 fn slugify(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .trim_matches('-')
         .to_string()
@@ -289,8 +300,11 @@ fn slugify(s: &str) -> String {
 
 /// Approximate time gap in seconds between two ISO 8601 timestamps.
 fn time_gap_secs(a: &str, b: &str) -> f64 {
-    let parse = |s: &str| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ").ok()
-        .or_else(|| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.fZ").ok());
+    let parse = |s: &str| {
+        chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ")
+            .ok()
+            .or_else(|| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.fZ").ok())
+    };
 
     match (parse(a), parse(b)) {
         (Some(ta), Some(tb)) => (tb - ta).num_seconds().abs() as f64,
@@ -301,10 +315,17 @@ fn time_gap_secs(a: &str, b: &str) -> f64 {
 /// Upsert a segment into the activity_sessions table.
 /// If a session with the same topic exists within MERGE_WINDOW_MINUTES, extend it.
 async fn upsert_session(db: &DatabaseManager, segment: &Segment) -> Result<()> {
-    let merge_cutoff = chrono::NaiveDateTime::parse_from_str(&segment.start_time, "%Y-%m-%dT%H:%M:%SZ")
-        .or_else(|_| chrono::NaiveDateTime::parse_from_str(&segment.start_time, "%Y-%m-%dT%H:%M:%S%.fZ"))
-        .map(|t| (t - Duration::minutes(MERGE_WINDOW_MINUTES)).format("%Y-%m-%dT%H:%M:%SZ").to_string())
-        .unwrap_or_else(|_| segment.start_time.clone());
+    let merge_cutoff =
+        chrono::NaiveDateTime::parse_from_str(&segment.start_time, "%Y-%m-%dT%H:%M:%SZ")
+            .or_else(|_| {
+                chrono::NaiveDateTime::parse_from_str(&segment.start_time, "%Y-%m-%dT%H:%M:%S%.fZ")
+            })
+            .map(|t| {
+                (t - Duration::minutes(MERGE_WINDOW_MINUTES))
+                    .format("%Y-%m-%dT%H:%M:%SZ")
+                    .to_string()
+            })
+            .unwrap_or_else(|_| segment.start_time.clone());
 
     // Check for existing session to merge into
     let check_query = format!(
@@ -332,10 +353,7 @@ async fn upsert_session(db: &DatabaseManager, segment: &Segment) -> Result<()> {
                 .get("compact_log")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let existing_count = row
-                .get("frame_count")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
+            let existing_count = row.get("frame_count").and_then(|v| v.as_i64()).unwrap_or(0);
 
             let mut merged_apps: HashSet<String> = existing_apps.into_iter().collect();
             merged_apps.insert(segment.app_name.clone());
@@ -368,7 +386,10 @@ async fn upsert_session(db: &DatabaseManager, segment: &Segment) -> Result<()> {
             );
 
             db.execute_raw_sql(&update_query).await?;
-            debug!("activity sessions: merged into session {} (topic={})", session_id, segment.topic);
+            debug!(
+                "activity sessions: merged into session {} (topic={})",
+                session_id, segment.topic
+            );
             return Ok(());
         }
     }
@@ -376,7 +397,8 @@ async fn upsert_session(db: &DatabaseManager, segment: &Segment) -> Result<()> {
     // Create new session
     let apps_json = serde_json::to_string(&[&segment.app_name])?;
     let windows_json = serde_json::to_string(&segment.windows)?;
-    let keywords_json = serde_json::to_string(&extract_keywords(&segment.windows, &segment.browser_urls))?;
+    let keywords_json =
+        serde_json::to_string(&extract_keywords(&segment.windows, &segment.browser_urls))?;
     let compact_log = build_compact_log_line(segment);
 
     let insert_query = format!(
@@ -393,7 +415,10 @@ async fn upsert_session(db: &DatabaseManager, segment: &Segment) -> Result<()> {
     );
 
     db.execute_raw_sql(&insert_query).await?;
-    debug!("activity sessions: created new session (topic={})", segment.topic);
+    debug!(
+        "activity sessions: created new session (topic={})",
+        segment.topic
+    );
 
     Ok(())
 }
@@ -462,8 +487,26 @@ fn extract_keywords(windows: &[String], urls: &[String]) -> Vec<String> {
 fn is_stop_word(word: &str) -> bool {
     matches!(
         word,
-        "the" | "and" | "for" | "with" | "from" | "that" | "this" | "are"
-            | "was" | "not" | "but" | "have" | "has" | "had" | "will" | "would"
-            | "code" | "app" | "file" | "new" | "tab"
+        "the"
+            | "and"
+            | "for"
+            | "with"
+            | "from"
+            | "that"
+            | "this"
+            | "are"
+            | "was"
+            | "not"
+            | "but"
+            | "have"
+            | "has"
+            | "had"
+            | "will"
+            | "would"
+            | "code"
+            | "app"
+            | "file"
+            | "new"
+            | "tab"
     )
 }
